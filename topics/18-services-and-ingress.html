@@ -135,7 +135,7 @@ spec:
             name: nginx-service
             port:
               number: 80` },
-        { type: "callout", kind: "warn", html: "The ingress-nginx controller project announced retirement (best-effort maintenance ending March 2026). Ingress the API still works, but new designs should use <b>Gateway API</b>, which the course uses for the final app. Check the current status before choosing a controller." }
+        { type: "callout", kind: "warn", html: "The <b>ingress-nginx controller is retired</b>: announced November 2025, best-effort maintenance ended March 2026, and there are no further releases or security patches. Existing installs keep running, and the Ingress <i>API</i> itself is not removed. New designs should use <b>Gateway API</b> (as the course does for the final app) or another maintained Ingress controller. The course still uses ingress-nginx for this demo, which is fine for learning." }
       ] },
     { id: "externaldns", title: "ExternalDNS: DNS records from Services", toc: "ExternalDNS",
       lead: "ExternalDNS watches Services and Ingresses/HTTPRoutes and creates records in your DNS provider (Cloudflare, Route53, Exoscale…). Annotate a LoadBalancer Service with a hostname and the A record appears.",
