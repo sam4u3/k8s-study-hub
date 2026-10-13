@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduler and Resources</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Scheduler playground: filter then score three nodes for a configurable Pod.
+const NODES = [
+  { name: "controlplane", cpu: 1200, labels: { "node-role.kubernetes.io/control-plane": "", "topology.kubernetes.io/region": "us-east-1" }, taints: ["node-role.kubernetes.io/control-plane:NoSchedule"], pods: 9 },
+  { name: "node01", cpu: 900, labels: { disktype: "ssd", workload: "wasm", "topology.kubernetes.io/region": "ch-dk-2" }, taints: ["app=demo:NoSchedule"], pods: 4 },
+  { name: "node02", cpu: 2600, labels: { disktype: "hdd", "topology.kubernetes.io/region": "ch-dk-2" }, taints: [], pods: 6 }
+];
+const schedHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>CPU request (m): <b id="cpuV">300</b><input class="input" type="range" min="100" max="3000" step="100" value="300" id="cpu"></label>
+    <label>nodeSelector<select class="input" id="sel"><option value="">none</option><option value="workload=wasm">workload: wasm</option><option value="disktype=ssd">disktype: ssd</option></select></label>
+  </div>
+  <div class="sim-row">
+    <label>Required affinity<select class="input" id="aff"><option value="">none</option><option value="ch-dk-2">region In [ch-dk-2]</option><option value="us-east-1">region In [us-east-1]</option></select></label>
+    <label>Preferred affinity<select class="input" id="pref"><option value="">none</option><option value="ssd" selected>disktype In [ssd] (weight 1)</option></select></label>
+    <label>Tolerations<select class="input" id="tol"><option value="">none</option><option value="app=demo">app=demo:NoSchedule</option><option value="cp">control-plane:NoSchedule</option></select></label>
+  </div>
+  <div id="nodes" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
+  <div class="pipe-out" id="sOut"></div>
+</div>`;
+function initSched(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#nodes").style.gridTemplateColumns = "1fr";
+  const go = () => {
+    const cpu = +$("#cpu").value, sel = $("#sel").value, aff = $("#aff").value, pref = $("#pref").value, tol = $("#tol").value;
+    $("#cpuV").textContent = cpu;
+    const res = NODES.map(n => {
+      const why = [];
+      for (const t of n.taints) {
+        const ok = (tol === "app=demo" && t.startsWith("app=demo")) || (tol === "cp" && t.includes("control-plane"));
+        if (!ok) why.push(`taint ${t} not tolerated`);
+      }
+      if (sel) { const [k, v] = sel.split("="); if (n.labels[k] !== v) why.push(`nodeSelector ${k}=${v} missing`); }
+      if (aff && n.labels["topology.kubernetes.io/region"] !== aff) why.push(`required affinity region≠${aff}`);
+      if (cpu > n.cpu) why.push(`Insufficient cpu (${n.cpu}m free)`);
+      let score = 0;
+      if (!why.length) {
+        score = Math.round((n.cpu - cpu) / n.cpu * 50) + (pref && n.labels.disktype === "ssd" ? 50 : 0) + Math.round((10 - n.pods) * 2);
+      }
+      return { n, why, score };
+    });
+    const feas = res.filter(r => !r.why.length).sort((a, b) => b.score - a.score);
+    const win = feas[0];
+    $("#nodes").innerHTML = res.map(r => `<div class="box fadein" style="border-color:${r === win ? "var(--green)" : r.why.length ? "rgba(248,113,113,.5)" : "var(--border)"};${r === win ? "box-shadow:0 0 22px -6px var(--green)" : ""}">
+      <b>${r === win ? "🏆 " : r.why.length ? "🚫 " : "✅ "}${r.n.name}</b>
+      <div class="faint" style="font:11.5px/1.6 var(--mono);margin:6px 0">${Object.entries(r.n.labels).map(([k, v]) => `${k.replace("topology.kubernetes.io/", "")}${v ? "=" + v : ""}`).join("<br>")}${r.n.taints.map(t => `<br><span style="color:#fca5a5">taint ${t}</span>`).join("")}<br>free cpu ${r.n.cpu}m</div>
+      ${r.why.length ? `<div style="color:#fca5a5;font-size:12.5px">${r.why.join("<br>")}</div>` : `<div style="color:#86efac;font-size:12.5px">score ${r.score}</div>`}</div>`).join("");
+    $("#sOut").innerHTML = win
+      ? `<span style="color:var(--green)">✓ Scheduled: Successfully assigned default/mypod to ${win.n.name}</span>`
+      : `<span style="color:var(--red)">✗ 0/3 nodes are available: ${res.map(r => r.why[0]).join(", ")}. Pod stays Pending.</span>`;
+  };
+  el.querySelectorAll("input,select").forEach(i => i.oninput = go);
+  go();
+}
+
+K8S_RENDER({
+  id: "sched-scheduler", group: "scheduling", minutes: 40,
+  title: 'The <span class="grad-text">scheduler</span> & Pod placement',
+  lead: "The scheduler answers one question per Pod: which node? It filters out nodes that can't run the Pod, scores the rest, and binds. Everything in this topic is an input to those two phases. Namespace guard rails (quotas, limit ranges) are in the Policies topic.",
+  parts: [["Namespaces & labels", "Organise and select"], ["How it decides", "Filter → score → bind"], ["Placement rules", "Selector, affinity, taints, spread"], ["Priority & gates", "Who goes first"]],
+  sections: [
+    { id: "labels", title: "Namespaces, labels and selectors", toc: "Namespaces & labels",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["📁", "Namespaces", "Scope for names, RBAC, quotas and policies. Not a security boundary by themselves. <code>kubectl config set-context --current --namespace=dev</code>."],
+          ["🏷️", "Labels", "Key/value on any object: <code>app=web</code>, <code>tier=backend</code>. Used by selectors everywhere."],
+          ["🔎", "Selectors", "Equality: <code>app=web</code>, <code>app!=web</code>. Set-based: <code>app in (test,bootcamp)</code>, <code>!canary</code>."]
+        ] },
+        { type: "term", title: "labels & selectors", lines: [
+          "$ kubectl create ns dev; kubectl create ns team-a",
+          "$ kubectl create deploy demo -n team-a --image=nginx",
+          "$ kubectl run nginx --image nginx",
+          "$ kubectl label pod nginx app=testing",
+          "$ kubectl get pods --show-labels",
+          "$ kubectl get pod -l app!=nginx",
+          "$ kubectl create deploy web --image=nginx --replicas 3",
+          "$ kubectl get pods -l 'app in (test,web)'",
+          "✓ selectors are how Services, Deployments and kubectl find objects"
+        ] }
+      ] },
+    { id: "decide", title: "How the scheduler decides", toc: "How it decides",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📥", "Queue", "Pod enters the scheduling queue", "Pods without <code>nodeName</code> are queued, ordered by priority. Pods with scheduling gates wait outside."],
+          ["🧹", "Filter", "Filter (predicates)", "Drop nodes that can't run it: insufficient CPU/memory requests, nodeSelector/affinity mismatch, untolerated taints, port conflicts, volume topology."],
+          ["📊", "Score", "Score (priorities)", "Rank feasible nodes: least allocated resources, preferred affinity weights, topology spread, image locality, balanced allocation."],
+          ["🔗", "Bind", "Bind", "Write a Binding for the highest score. Ties are broken randomly."],
+          ["⚔️", "Preempt", "Nothing fits? Preempt", "If the Pod has higher priority, the scheduler may evict lower-priority Pods to make room. Otherwise it stays Pending."]
+        ] },
+        { type: "h3", text: "Scheduler playground" },
+        { type: "custom", html: schedHtml, init: initSched },
+        { type: "callout", kind: "info", html: "The scheduler uses <b>requests</b>, not actual usage. A node at 5% real CPU can still be 'full' if Pods requested all of it." }
+      ] },
+    { id: "rules", title: "Placement rules", toc: "Placement rules",
+      blocks: [
+        { type: "tabs", tabs: [
+          { label: "nodeName", blocks: [
+            { type: "p", html: "Skips the scheduler entirely. The kubelet on that node runs it. Use only for debugging; no resource checks happen." },
+            { type: "code", title: "nodename.yaml", code: "spec:\n  nodeName: pool-bf9a6-esrwy\n  containers:\n  - image: nginx\n    name: first" }] },
+          { label: "nodeSelector", blocks: [
+            { type: "p", html: "Simplest constraint: node must have all these labels." },
+            { type: "code", title: "nodeselector.yaml", code: "kubectl label node node01 workload=wasm\n---\nspec:\n  containers:\n  - name: nginx\n    image: nginx\n  nodeSelector:\n    workload: wasm" }] },
+          { label: "Node affinity", blocks: [
+            { type: "p", html: "Expressive selector with <b>required</b> (hard filter) and <b>preferred</b> (weighted score) rules. 'IgnoredDuringExecution' means running Pods aren't evicted if labels change later." },
+            { type: "code", title: "nodeaffinity.yaml", code: `affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: "topology.kubernetes.io/region"
+          operator: In
+          values: ["ch-dk-2"]
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+        - key: "disktype"
+          operator: In
+          values: ["ssd"]` }] },
+          { label: "Taints & tolerations", blocks: [
+            { type: "p", html: "Taints repel Pods from a node; tolerations let specific Pods in. A toleration <b>allows</b>, it doesn't <b>attract</b>: combine with affinity to dedicate nodes. Effects: <code>NoSchedule</code>, <code>PreferNoSchedule</code>, <code>NoExecute</code> (also evicts running Pods)." },
+            { type: "code", title: "toleration.yaml", code: `kubectl taint nodes node01 app=demo:NoSchedule
+kubectl taint nodes node01 app=demo:NoSchedule-   # remove
+---
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+  tolerations:
+  - key: "app"
+    operator: "Equal"
+    value: "demo"
+    effect: "NoSchedule"` }] },
+          { label: "Topology spread", blocks: [
+            { type: "p", html: "Spread replicas evenly across nodes or zones. <code>maxSkew: 1</code> = the busiest domain may have at most 1 more matching Pod than the emptiest. Try it: cordon one node and scale up to watch new Pods go Pending when the skew can't be met." },
+            { type: "code", title: "topology.yaml", code: `spec:
+  replicas: 4
+  template:
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: "kubernetes.io/hostname"
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: demo-app` }] },
+          { label: "Pod (anti-)affinity", blocks: [
+            { type: "p", html: "Place Pods relative to other Pods: 'next to the cache' (affinity) or 'never two replicas on one node' (anti-affinity)." },
+            { type: "code", title: "anti-affinity", code: `affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchLabels: {app: web}
+      topologyKey: kubernetes.io/hostname` }] }
+        ] }
+      ] },
+    { id: "priority", title: "Priority, preemption and scheduling gates", toc: "Priority & gates",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "PriorityClass", chip: "who goes first", chipClass: "violet", color: "var(--violet)", items: ["Cluster-scoped integer value; higher = more important", "Higher-priority Pods jump the queue", "Can preempt (evict) lower-priority Pods when the cluster is full", "Built-ins: <code>system-cluster-critical</code>, <code>system-node-critical</code>"] },
+          { title: "Scheduling gates", chip: "not yet", chipClass: "amber", color: "var(--amber)", items: ["<code>spec.schedulingGates</code> keeps a Pod out of the queue", "Status: <code>SchedulingGated</code>", "Remove the gate to release it (quota managers, batch systems like Kueue)", "GA in 1.30"] }
+        ] },
+        { type: "code", title: "priority.yaml + priority_pod.yaml + podschedulereadiness.yaml", code: `apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: demo-priority
+value: 1000000
+globalDefault: false
+description: "This priority class should be used for higher priority."
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: high-priority-pod
+  namespace: demo
+spec:
+  priorityClassName: demo-priority
+  containers:
+  - name: busybox
+    image: busybox
+    command: ["sleep", "3600"]
+    resources:
+      requests: {cpu: "300m", memory: "300Mi"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-pod
+spec:
+  schedulingGates:
+  - name: example.com/quota-check              # kubectl edit / patch to remove → Pod gets scheduled
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.6` }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧹", "Filter then score", "Hard rules filter; preferences score; highest wins."],
+      ["📏", "Requests drive placement", "Not real usage. No request = 0 for scheduling."],
+      ["🚫", "Taints repel, tolerations permit", "Toleration alone doesn't attract; add affinity."],
+      ["🌍", "Spread for HA", "topologySpreadConstraints or pod anti-affinity."],
+      ["⚔️", "Priority can preempt", "Higher priority Pods evict lower ones when full."],
+      ["🧮", "Quota vs LimitRange", "Namespace totals vs per-container defaults and bounds."]
+    ],
+    cheat: `kubectl label node node01 disktype=ssd
+kubectl taint nodes node01 app=demo:NoSchedule[-]
+kubectl cordon|uncordon node01; kubectl drain node01 --ignore-daemonsets
+kubectl describe node node01 | grep -A5 Allocated
+kubectl get pods -o wide --field-selector=status.phase=Pending
+kubectl describe pod <p> | grep -A10 Events      # FailedScheduling reasons
+kubectl get priorityclass; kubectl describe quota,limitrange -n <ns>`,
+    quiz: [
+      ["A Pod tolerates node01's taint. Will it always land on node01?", ["Yes", "No, tolerations only permit; use affinity to attract", "Only with priority", "Only with nodeName"], 1, "Tolerations remove a filter, they don't add a preference."],
+      ["Which field bypasses the scheduler?", ["nodeSelector", "nodeName", "affinity", "priorityClassName"], 1, "nodeName binds directly."],
+      ["Scheduler decides 'fits' based on…", ["Live CPU usage", "Sum of container requests vs allocatable", "Limits only", "Image size"], 1, "Requests are reservations."],
+      ["A Pod in a namespace with LimitRange defaults omits resources. Result?", ["Rejected", "Defaults are injected", "BestEffort", "Pending"], 1, "LimitRange mutates in defaults at admission."],
+      ["status SchedulingGated means…", ["No node fits", "spec.schedulingGates still has entries", "Image pulling", "Quota exceeded"], 1, "Remove the gates to let the scheduler see it."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

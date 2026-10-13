@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Kubernetes API</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const codeBox = (t, c) => K8S_CODE(t, c);
+
+function initAnat() {
+  const URLS = {
+    core: [
+      ["https://cp1:6443", "#67e8f9", "<b>API server endpoint.</b> Every client (kubectl, kubelet, controllers) talks only to kube-apiserver over HTTPS."],
+      ["/api", "#5b8cff", "<b>/api</b> is the legacy prefix used <b>only by the core group</b>. The core group has no name."],
+      ["/v1", "#34d399", "<b>Version.</b> The core group has a single version: v1. In YAML this is just <code>apiVersion: v1</code>."],
+      ["/namespaces/dev", "#fbbf24", "<b>Namespace scope.</b> Omitted for cluster-scoped resources such as nodes or namespaces."],
+      ["/pods", "#ec4899", "<b>Resource</b> (lowercase plural). Kind is Pod; resource is pods."],
+      ["/web-0", "#8b5cf6", "<b>Object name.</b> Without it you get a list. Add <code>/log</code> or <code>/exec</code> for subresources."]
+    ],
+    named: [
+      ["https://cp1:6443", "#67e8f9", "<b>API server endpoint.</b> Same server for every group."],
+      ["/apis", "#5b8cff", "<b>/apis</b> is the prefix for all <b>named groups</b> (everything except core)."],
+      ["/apps", "#a78bfa", "<b>Group name.</b> Groups let features evolve and version independently: apps, batch, rbac.authorization.k8s.io…"],
+      ["/v1", "#34d399", "<b>Version</b> inside the group. Together: <code>apiVersion: apps/v1</code>."],
+      ["/namespaces/dev", "#fbbf24", "<b>Namespace scope.</b> Deployments are namespaced."],
+      ["/deployments", "#ec4899", "<b>Resource.</b> kubectl maps <code>deploy</code> / <code>deployment</code> to this through discovery."],
+      ["/web", "#8b5cf6", "<b>Object name.</b> Try <code>/scale</code> or <code>/status</code> subresources."]
+    ]
+  };
+  let urlMode = "named", segI = 0, segTimer = null;
+  function drawUrl() {
+    const segs = URLS[urlMode];
+    $("#url").innerHTML = segs.map((s, i) => `<span class="seg" style="--c:${s[1]}" data-i="${i}">${s[0]}</span>`).join("");
+    $("#url").querySelectorAll(".seg").forEach(el => el.onmouseenter = () => { segI = +el.dataset.i; lightSeg(); restartSeg(); });
+    segI = 0; lightSeg();
+  }
+  function lightSeg() {
+    const segs = URLS[urlMode];
+    $("#url").querySelectorAll(".seg").forEach((el, i) => el.classList.toggle("on", i === segI));
+    $("#segExplain").innerHTML = segs[segI][2];
+  }
+  function restartSeg() {
+    clearInterval(segTimer);
+    segTimer = setInterval(() => { segI = (segI + 1) % URLS[urlMode].length; lightSeg(); }, 2600);
+  }
+  $("#urlCore").onclick = () => { urlMode = "core"; drawUrl(); restartSeg(); };
+  $("#urlNamed").onclick = () => { urlMode = "named"; drawUrl(); restartSeg(); };
+  drawUrl(); restartSeg();
+
+}
+function initMat() {
+  const matIo = new IntersectionObserver(en => en.forEach(e => {
+    if (e.isIntersecting) { e.target.classList.add("in"); matIo.unobserve(e.target); }
+  }), { threshold: .4 });
+  document.querySelectorAll(".mat").forEach(m => matIo.observe(m));
+
+}
+function initExplorer() {
+  /* API explorer data: [group, version, resource, kind, namespaced, shortnames] */
+  const API = [
+    ["", "v1", "pods", "Pod", 1, "po"], ["", "v1", "services", "Service", 1, "svc"], ["", "v1", "configmaps", "ConfigMap", 1, "cm"],
+    ["", "v1", "secrets", "Secret", 1, ""], ["", "v1", "namespaces", "Namespace", 0, "ns"], ["", "v1", "nodes", "Node", 0, "no"],
+    ["", "v1", "persistentvolumes", "PersistentVolume", 0, "pv"], ["", "v1", "persistentvolumeclaims", "PersistentVolumeClaim", 1, "pvc"],
+    ["", "v1", "serviceaccounts", "ServiceAccount", 1, "sa"], ["", "v1", "endpoints", "Endpoints", 1, "ep"], ["", "v1", "events", "Event", 1, "ev"],
+    ["", "v1", "limitranges", "LimitRange", 1, "limits"], ["", "v1", "resourcequotas", "ResourceQuota", 1, "quota"],
+    ["", "v1", "replicationcontrollers", "ReplicationController", 1, "rc"],
+    ["apps", "v1", "deployments", "Deployment", 1, "deploy"], ["apps", "v1", "replicasets", "ReplicaSet", 1, "rs"],
+    ["apps", "v1", "statefulsets", "StatefulSet", 1, "sts"], ["apps", "v1", "daemonsets", "DaemonSet", 1, "ds"],
+    ["apps", "v1", "controllerrevisions", "ControllerRevision", 1, ""],
+    ["batch", "v1", "jobs", "Job", 1, ""], ["batch", "v1", "cronjobs", "CronJob", 1, "cj"],
+    ["autoscaling", "v2", "horizontalpodautoscalers", "HorizontalPodAutoscaler", 1, "hpa"],
+    ["autoscaling", "v1", "horizontalpodautoscalers", "HorizontalPodAutoscaler", 1, "hpa"],
+    ["networking.k8s.io", "v1", "ingresses", "Ingress", 1, "ing"], ["networking.k8s.io", "v1", "ingressclasses", "IngressClass", 0, ""],
+    ["networking.k8s.io", "v1", "networkpolicies", "NetworkPolicy", 1, "netpol"],
+    ["networking.k8s.io", "v1", "servicecidrs", "ServiceCIDR", 0, ""], ["networking.k8s.io", "v1", "ipaddresses", "IPAddress", 0, "ip"],
+    ["discovery.k8s.io", "v1", "endpointslices", "EndpointSlice", 1, ""],
+    ["rbac.authorization.k8s.io", "v1", "roles", "Role", 1, ""], ["rbac.authorization.k8s.io", "v1", "rolebindings", "RoleBinding", 1, ""],
+    ["rbac.authorization.k8s.io", "v1", "clusterroles", "ClusterRole", 0, ""], ["rbac.authorization.k8s.io", "v1", "clusterrolebindings", "ClusterRoleBinding", 0, ""],
+    ["certificates.k8s.io", "v1", "certificatesigningrequests", "CertificateSigningRequest", 0, "csr"],
+    ["authentication.k8s.io", "v1", "tokenreviews", "TokenReview", 0, ""], ["authentication.k8s.io", "v1", "selfsubjectreviews", "SelfSubjectReview", 0, ""],
+    ["authorization.k8s.io", "v1", "subjectaccessreviews", "SubjectAccessReview", 0, ""],
+    ["authorization.k8s.io", "v1", "selfsubjectaccessreviews", "SelfSubjectAccessReview", 0, ""],
+    ["authorization.k8s.io", "v1", "localsubjectaccessreviews", "LocalSubjectAccessReview", 1, ""],
+    ["storage.k8s.io", "v1", "storageclasses", "StorageClass", 0, "sc"], ["storage.k8s.io", "v1", "volumeattachments", "VolumeAttachment", 0, ""],
+    ["storage.k8s.io", "v1", "csidrivers", "CSIDriver", 0, ""], ["storage.k8s.io", "v1", "csinodes", "CSINode", 0, ""],
+    ["policy", "v1", "poddisruptionbudgets", "PodDisruptionBudget", 1, "pdb"],
+    ["coordination.k8s.io", "v1", "leases", "Lease", 1, ""],
+    ["scheduling.k8s.io", "v1", "priorityclasses", "PriorityClass", 0, "pc"],
+    ["node.k8s.io", "v1", "runtimeclasses", "RuntimeClass", 0, ""],
+    ["apiextensions.k8s.io", "v1", "customresourcedefinitions", "CustomResourceDefinition", 0, "crd"],
+    ["apiregistration.k8s.io", "v1", "apiservices", "APIService", 0, ""],
+    ["admissionregistration.k8s.io", "v1", "mutatingwebhookconfigurations", "MutatingWebhookConfiguration", 0, ""],
+    ["admissionregistration.k8s.io", "v1", "validatingwebhookconfigurations", "ValidatingWebhookConfiguration", 0, ""],
+    ["admissionregistration.k8s.io", "v1", "validatingadmissionpolicies", "ValidatingAdmissionPolicy", 0, ""],
+    ["events.k8s.io", "v1", "events", "Event", 1, "ev"],
+    ["flowcontrol.apiserver.k8s.io", "v1", "flowschemas", "FlowSchema", 0, ""],
+    ["flowcontrol.apiserver.k8s.io", "v1", "prioritylevelconfigurations", "PriorityLevelConfiguration", 0, ""],
+    ["resource.k8s.io", "v1", "resourceclaims", "ResourceClaim", 1, ""], ["resource.k8s.io", "v1", "deviceclasses", "DeviceClass", 0, ""],
+    ["resource.k8s.io", "v1", "resourceslices", "ResourceSlice", 0, ""]
+  ];
+  const gv = r => (r[0] ? r[0] + "/" : "") + r[1];
+  const groupsList = [...new Set(API.map(r => r[0]))];
+  $("#apiGroupSel").innerHTML = `<option value="*">All groups (${groupsList.length})</option>` + groupsList.map(g => `<option value="${g}">${g || "core (\"\")"}</option>`).join("");
+  let selRow = null;
+  function drawApi() {
+    const q = $("#apiSearch").value.trim().toLowerCase(), g = $("#apiGroupSel").value, sc = $("#apiScopeSel").value;
+    const rows = API.filter(r => {
+      if (g !== "*" && r[0] !== g) return false;
+      if (sc === "ns" && !r[4]) return false;
+      if (sc === "cl" && r[4]) return false;
+      if (!q) return true;
+      return (r.join(" ") + (r[4] ? " namespaced" : " cluster") + (r[0] ? "" : " core")).toLowerCase().includes(q);
+    });
+    $("#apiCount").textContent = `${rows.length} of ${API.length}`;
+    $("#apiBody").innerHTML = rows.map(r => `<tr data-k="${gv(r)}|${r[2]}" class="${selRow === gv(r) + "|" + r[2] ? "sel" : ""}"><td>${r[2]}</td><td>${r[3]}</td>
+      <td><span class="group-pill ${r[0] ? "" : "core"}">${gv(r)}</span></td><td>${r[5] ? `<code>${r[5]}</code>` : ""}</td>
+      <td>${r[4] ? '<span class="chip blue">namespaced</span>' : '<span class="chip violet">cluster</span>'}</td></tr>`).join("");
+    $("#apiBody").querySelectorAll("tr").forEach(tr => tr.onclick = () => {
+      const [g, res] = tr.dataset.k.split("|");
+      selRow = tr.dataset.k; $("#bGV").value = g; fillRes(); $("#bRes").value = res; build(); drawApi();
+      $("#bUrl").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
+  ["apiSearch", "apiGroupSel", "apiScopeSel"].forEach(id => $("#" + id).addEventListener("input", drawApi));
+
+  const gvs = [...new Set(API.map(gv))];
+  $("#bGV").innerHTML = gvs.map(x => `<option>${x}</option>`).join("");
+  function fillRes() {
+    const v = $("#bGV").value;
+    $("#bRes").innerHTML = API.filter(r => gv(r) === v).map(r => `<option>${r[2]}</option>`).join("");
+  }
+  function build() {
+    const v = $("#bGV").value, res = $("#bRes").value;
+    const row = API.find(r => gv(r) === v && r[2] === res);
+    const core = !row[0];
+    const ns = $("#bNs").value.trim(), name = $("#bName").value.trim();
+    $("#bNs").disabled = !row[4];
+    const parts = [core ? "/api" : "/apis", "/" + v];
+    if (row[4] && ns) parts.push("/namespaces/" + ns);
+    parts.push("/" + res);
+    if (name) parts.push("/" + name);
+    const path = parts.join("");
+    const colors = ["#5b8cff", "#34d399", "#fbbf24", "#ec4899", "#8b5cf6"];
+    let ci = 0;
+    $("#bUrl").innerHTML = parts.map(p => `<span style="color:${p.startsWith("/namespaces") ? "#fbbf24" : colors[Math.min(ci++, 4)]}">${esc(p)}</span>`).join("");
+    const nsFlag = row[4] ? ` -n ${ns || "default"}` : "";
+    $("#bCmd").innerHTML = codeBox("equivalent kubectl",
+`# apiVersion in YAML: ${core ? "v1" : v}   kind: ${row[3]}   ${row[4] ? "namespaced" : "cluster-scoped"}
+kubectl get --raw ${path}
+kubectl get ${res}${name ? " " + name : ""}${nsFlag} -o yaml${row[5] ? `\nkubectl get ${row[5]}${nsFlag}   # short name` : ""}
+kubectl explain ${res}${core ? "" : " --api-version=" + v}`);
+    K8S.initCopy($("#bCmd"));
+  }
+  $("#bGV").addEventListener("change", () => { fillRes(); build(); });
+  ["bRes", "bNs", "bName"].forEach(id => $("#" + id).addEventListener("input", build));
+  $("#bGV").value = "apps/v1"; fillRes(); $("#bRes").value = "deployments"; build(); drawApi();
+
+  const REMOVED = [
+    ["extensions/v1beta1", "Deployment, DaemonSet, ReplicaSet", "apps/v1", "1.16"],
+    ["extensions/v1beta1, networking.k8s.io/v1beta1", "Ingress", "networking.k8s.io/v1", "1.22"],
+    ["rbac.authorization.k8s.io/v1beta1", "Role, ClusterRole, bindings", "rbac.authorization.k8s.io/v1", "1.22"],
+    ["certificates.k8s.io/v1beta1", "CertificateSigningRequest", "certificates.k8s.io/v1", "1.22"],
+    ["apiextensions.k8s.io/v1beta1", "CustomResourceDefinition", "apiextensions.k8s.io/v1", "1.22"],
+    ["batch/v1beta1", "CronJob", "batch/v1", "1.25"],
+    ["policy/v1beta1", "PodDisruptionBudget", "policy/v1", "1.25"],
+    ["policy/v1beta1", "PodSecurityPolicy", "Pod Security Admission (labels)", "1.25"],
+    ["autoscaling/v2beta2", "HorizontalPodAutoscaler", "autoscaling/v2", "1.26"],
+    ["flowcontrol.apiserver.k8s.io/v1beta3", "FlowSchema, PriorityLevelConfiguration", "flowcontrol.apiserver.k8s.io/v1", "1.32"]
+  ];
+  $("#removedTbl").innerHTML += REMOVED.map(r => `<tr><td><code style="background:rgba(248,113,113,.12);color:#fca5a5">${r[0]}</code></td><td>${r[1]}</td><td><code>${r[2]}</code></td><td><span class="chip red">${r[3]}</span></td></tr>`).join("");
+}
+K8S_RENDER({
+  id: "overview-api", group: "overview", minutes: 25,
+  title: 'The Kubernetes <span class="grad-text">API</span>: groups & versions',
+  lead: "Every object is a REST resource served by kube-apiserver. Resources are organised by <b>group</b> and <b>version</b>; the <code>apiVersion</code> field in YAML is exactly <code>group/version</code>, or just <code>v1</code> for the core group.",
+  parts: [["Anatomy", "Read any API path"], ["Maturity", "alpha, beta, stable"], ["Explorer", "60 built-in resources"], ["Path builder", "URL + kubectl"], ["Deprecations", "Removed APIs"]],
+  sections: [
+    { id: "anatomy", title: "Anatomy of an API path", toc: "Anatomy", blocks: [{ type: "custom", html: `<div class="anatomy glass reveal">
+        <div class="url" id="url"></div>
+        <div class="seg-explain" id="segExplain"></div>
+        <div style="margin-top:14px;display:flex;justify-content:center;gap:8px">
+          <button class="btn small" id="urlCore">Core group example</button>
+          <button class="btn small" id="urlNamed">Named group example</button>
+        </div>
+      </div>
+
+      `, init: initAnat }] },
+    { id: "maturity", title: "Version maturity", toc: "Maturity", blocks: [{ type: "custom", html: `<div class="maturity">
+        <div class="mat glass reveal" style="--w:25%"><span class="chip red">alpha · v1alpha1</span><div class="meter"><i style="background:var(--red)"></i></div>
+          <ul><li>Disabled by default (feature gate)</li><li>May change or vanish in any release</li><li>Never in production</li></ul></div>
+        <div class="mat glass reveal" style="--w:62%"><span class="chip amber">beta · v1beta1</span><div class="meter"><i style="background:var(--amber)"></i></div>
+          <ul><li>New beta APIs are off by default since 1.24</li><li>Schema may still change</li><li>Deprecated, then removed after GA ships</li></ul></div>
+        <div class="mat glass reveal" style="--w:100%"><span class="chip green">stable · v1, v2</span><div class="meter"><i style="background:var(--green)"></i></div>
+          <ul><li>Enabled by default</li><li>Backwards-compatible within the major version</li><li>Use these for real workloads</li></ul></div>
+      </div>
+
+      `, init: initMat }] },
+    { id: "explorer", title: "API explorer and path builder", toc: "Explorer", blocks: [{ type: "custom", html: `<div class="count-badge" style="margin-bottom:6px">showing <span id="apiCount"></span></div><p class="muted reveal" style="margin-top:0;font-size:14px">Common built-in resources on a recent cluster. Your cluster is the source of truth: run <code>kubectl api-resources</code>. Click a row to load it into the path builder.</p>
+      <div class="panel glass reveal">
+        <div class="explorer-bar">
+          <input class="input" id="apiSearch" type="search" placeholder="Filter: deploy, rbac, csr, namespaced…">
+          <select class="input" id="apiGroupSel"></select>
+          <select class="input" id="apiScopeSel"><option value="">All scopes</option><option value="ns">Namespaced</option><option value="cl">Cluster-scoped</option></select>
+        </div>
+        <div class="tbl-wrap" style="max-height:420px;overflow-y:auto">
+          <table class="tbl api-tbl"><thead><tr><th>Resource</th><th>Kind</th><th>Group / Version</th><th>Short</th><th>Scope</th></tr></thead><tbody id="apiBody"></tbody></table>
+        </div>
+      </div>
+
+      <h3 class="sub">Path builder</h3><div class="panel glass reveal">
+        <div class="builder">
+          <label>Group/version<select class="input" id="bGV"></select></label>
+          <label>Resource<select class="input" id="bRes"></select></label>
+          <label>Namespace<input class="input" id="bNs" value="default"></label>
+          <label>Name (optional)<input class="input" id="bName" placeholder="e.g. web"></label>
+        </div>
+        <div class="built-url" id="bUrl"></div>
+        <div id="bCmd"></div>
+      </div>
+
+      `, init: initExplorer }] },
+    { id: "discover", title: "Discover the API yourself", toc: "Discover", blocks: [{ type: "custom", html: `<div class="code reveal"><div class="code-head"><span><span class="dots"><i></i><i></i><i></i></span>discovery commands</span><button class="copy">Copy</button></div><pre class="term"><span class="ln cmd">kubectl api-versions</span>
+<span class="ln out">admissionregistration.k8s.io/v1
+apps/v1
+authentication.k8s.io/v1
+authorization.k8s.io/v1
+autoscaling/v1
+autoscaling/v2
+batch/v1
+certificates.k8s.io/v1
+...
+v1</span>
+<span class="ln cmd">kubectl api-resources -o wide --sort-by=name</span>
+<span class="ln cmd">kubectl api-resources --api-group=apps</span>
+<span class="ln cmd">kubectl api-resources --namespaced=false</span>
+<span class="ln cmd">kubectl explain deployment.spec.strategy --recursive</span>
+<span class="ln cmd">kubectl get --raw /apis | jq -r '.groups[].preferredVersion.groupVersion'</span>
+<span class="ln cmd">kubectl get --raw /api/v1/namespaces/kube-system/pods | jq '.items[].metadata.name'</span>
+<span class="ln cmd">kubectl proxy --port=8001 &   # then: curl localhost:8001/apis/apps/v1</span>
+<span class="ln ok">✓ every kubectl command is an HTTP call: add -v=6 to see the URL</span></pre></div>
+
+      ` }] },
+    { id: "removed", title: "Removed APIs that still break old YAML", toc: "Deprecations", blocks: [{ type: "custom", html: `<div class="panel glass reveal tbl-wrap">
+        <table class="tbl" id="removedTbl"><tr><th>Old apiVersion</th><th>Kind</th><th>Use instead</th><th>Removed in</th></tr></table>
+      </div>
+      <div class="callout info reveal"><span class="ic">ℹ️</span><div>Objects in etcd are stored at one version and converted on read. Upgrading the cluster does not break running objects; it breaks <b>manifests and tools</b> that still send a removed <code>apiVersion</code>. Scan manifests before each upgrade.</div></div>` }] }
+  ],
+  summary: {
+    takeaways: [[
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][3], [
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][4],
+      ["🔍", "Discovery", "kubectl api-resources and api-versions read the server's discovery documents."],
+      ["📖", "kubectl explain", "Built-in schema docs for every field, including CRDs."],
+      ["🌐", "Every command is HTTP", "kubectl -v=6 shows the URLs; kubectl get --raw calls them directly."],
+      ["🧹", "Scan before upgrades", "Removed beta APIs break manifests and tools, not stored objects."]],
+    cheat: `kubectl api-versions
+kubectl api-resources -o wide --sort-by=name
+kubectl api-resources --namespaced=false
+kubectl explain deployment.spec.strategy --recursive
+kubectl get --raw /apis | jq -r '.groups[].preferredVersion.groupVersion'
+kubectl get pods -v=6`,
+    quiz: [[
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][0],
+      ["What does apiVersion: networking.k8s.io/v1 tell you?", ["Group networking.k8s.io, version v1", "Kind networking", "Namespace networking", "Core group"], 0, "group/version."],
+      ["Which version should production manifests use?", ["v1alpha1", "v1beta1", "The stable (v1/v2) version", "Any"], 2, "Alpha can disappear; beta can change."],
+      ["An upgrade removed batch/v1beta1. What breaks?", ["Running CronJobs", "Manifests and tools still sending batch/v1beta1", "etcd", "Nothing"], 1, "Stored objects are converted; old manifests are rejected."]]
+  }
+});
+</script>
+</body>
+</html>

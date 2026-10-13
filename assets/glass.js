@@ -4,7 +4,14 @@
   const KEY = "k8s-study-progress";
 
   function readProgress() {
-    try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return {}; }
+    let p = {};
+    try { p = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return {}; }
+    // Topic ids changed when topics were regrouped by the docs structure; carry old progress over.
+    const mig = window.K8S_ID_MIGRATION || {};
+    let changed = false;
+    Object.keys(p).forEach(k => { if (mig[k]) { if (!p[mig[k]]) p[mig[k]] = p[k]; delete p[k]; changed = true; } });
+    if (changed) writeProgress(p);
+    return p;
   }
   function writeProgress(p) {
     try { localStorage.setItem(KEY, JSON.stringify(p)); } catch (e) { /* storage blocked */ }

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disruptions and Eviction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Drain simulator with a PodDisruptionBudget.
+const pdbHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>PDB<select class="input" id="pMode"><option value="min">minAvailable</option><option value="max">maxUnavailable</option><option value="none">no PDB</option></select></label>
+    <label>value: <b id="pValV">2</b><input class="input" type="range" min="0" max="4" value="2" id="pVal"></label>
+  </div>
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" data-n="0">kubectl drain wk1</button><button class="btn small" data-n="1">kubectl drain wk2</button><button class="btn small" data-n="2">kubectl drain wk3</button><button class="btn small" id="pReset">Reset</button></div>
+  <div id="pNodes" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
+  <div class="pipe-out" id="pOut" style="max-height:170px;overflow:auto"></div>
+</div>`;
+function initPdb(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#pNodes").style.gridTemplateColumns = "1fr";
+  let nodes, timer = [];
+  const reset = () => { timer.forEach(clearTimeout); timer = []; nodes = [{ n: "wk1", pods: ["api-a", "api-b"], cord: false }, { n: "wk2", pods: ["api-c"], cord: false }, { n: "wk3", pods: ["api-d"], cord: false }]; $("#pOut").innerHTML = '<span class="faint"># Deployment api: 4 replicas, all Ready</span>'; draw(); };
+  const ready = () => nodes.reduce((a, n) => a + n.pods.filter(p => !p.startsWith("…")).length, 0);
+  const allowed = () => {
+    const m = $("#pMode").value, v = +$("#pVal").value, h = ready();
+    if (m === "none") return Infinity;
+    return m === "min" ? Math.max(0, h - v) : Math.max(0, v - (4 - h));
+  };
+  const draw = () => {
+    $("#pValV").textContent = $("#pVal").value;
+    $("#pNodes").innerHTML = nodes.map(n => `<div class="box" style="${n.cord ? "border-color:rgba(251,191,36,.6)" : ""}"><b>${n.n}</b> ${n.cord ? '<span class="pill a">SchedulingDisabled</span>' : ""}<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${n.pods.map(p => `<span class="pill ${p.startsWith("…") ? "a glow" : "g"}">${p}</span>`).join("") || '<span class="faint">empty</span>'}</div></div>`).join("");
+  };
+  const log = m => { $("#pOut").innerHTML += "<br>" + m; $("#pOut").scrollTop = 1e6; };
+  el.querySelectorAll("[data-n]").forEach(b => b.onclick = () => {
+    const node = nodes[+b.dataset.n]; if (node.cord) return;
+    node.cord = true; draw(); log(`<span class="faint">$ kubectl drain ${node.n} --ignore-daemonsets</span> → node cordoned`);
+    const tryEvict = () => {
+      if (!node.pods.length) { log(`<span style="color:var(--green)">✓ ${node.n} drained</span>`); return; }
+      const a = allowed();
+      if (a <= 0) { log(`<span style="color:var(--amber)">⏳ evicting ${node.pods[0]}: Cannot evict pod as it would violate the pod's disruption budget (disruptionsAllowed=0). Retrying…</span>`); timer.push(setTimeout(tryEvict, 1800)); return; }
+      const p = node.pods.shift(); log(`evicted ${p} (disruptionsAllowed was ${a === Infinity ? "∞" : a})`);
+      const target = nodes.find(n => !n.cord);
+      if (target) { const np = "…" + p.slice(4) + "2"; target.pods.push(np); draw(); timer.push(setTimeout(() => { target.pods = target.pods.map(x => x === np ? "api-" + np.slice(1) : x); draw(); log(`replacement api-${np.slice(1)} Ready on ${target.n}`); }, 1500)); }
+      else log(`<span style="color:var(--red)">no schedulable node left: replacement Pod stays Pending</span>`);
+      draw(); timer.push(setTimeout(tryEvict, 600));
+    };
+    timer.push(setTimeout(tryEvict, 500));
+  });
+  $("#pReset").onclick = reset; $("#pMode").onchange = draw; $("#pVal").oninput = draw;
+  reset();
+}
+
+K8S_RENDER({
+  id: "sched-disruptions", group: "scheduling", minutes: 25,
+  title: '<span class="grad-text">Disruptions</span>, PDBs & eviction',
+  lead: "Pods die for two kinds of reasons: things you do (drains, upgrades, autoscaler scale-down) and things that happen to you (hardware failure, out of memory). PodDisruptionBudgets protect against the first kind; good design survives the second.",
+  parts: [["Disruption types", "Voluntary vs involuntary"], ["PodDisruptionBudget", "Drain simulator"], ["Eviction API", "How drain asks nicely"], ["Node-pressure", "kubelet evictions"], ["Node shutdown", "Graceful and non-graceful"]],
+  sections: [
+    { id: "types", title: "Voluntary vs involuntary disruptions", toc: "Disruption types",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Voluntary", chip: "PDB respected", chipClass: "green", color: "var(--green)", items: ["<code>kubectl drain</code> for maintenance and upgrades", "Cluster Autoscaler / Karpenter consolidation", "VPA updater evictions", "Anything using the <b>Eviction API</b>"] },
+          { title: "Involuntary", chip: "PDB can't help", chipClass: "red", color: "var(--red)", items: ["Node hardware or kernel failure, VM deleted", "Network partition from the control plane", "Node-pressure eviction (memory/disk)", "<code>kubectl delete pod</code> and deleting a Deployment (bypass the Eviction API)"] }
+        ] },
+        { type: "callout", kind: "info", html: "Pods disrupted by the system get a <code>DisruptionTarget</code> condition explaining why (stable since v1.31). Jobs can use it in a <code>podFailurePolicy</code> to not count those as app failures." }
+      ] },
+    { id: "pdb", title: "PodDisruptionBudget", toc: "PodDisruptionBudget",
+      lead: "A PDB states how many Pods of a set must stay up during voluntary disruptions. Drain calls the Eviction API; the API server refuses evictions that would break the budget.",
+      blocks: [
+        { type: "custom", html: pdbHtml, init: initPdb },
+        { type: "code", title: "pdb.yaml", code: `apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 2               # or maxUnavailable: 1 (pick one); integers or percentages
+  selector:
+    matchLabels:
+      app: api
+  unhealthyPodEvictionPolicy: AlwaysAllow   # don't let already-broken Pods block drains` },
+        { type: "callout", kind: "warn", html: "Classic deadlock: replicas 1 with <code>minAvailable: 1</code> (or <code>maxUnavailable: 0</code>). No eviction is ever allowed, so node drains and cluster upgrades hang forever. Run at least 2 replicas, and use <code>maxUnavailable: 1</code> for most stateless apps." }
+      ] },
+    { id: "eviction", title: "API-initiated eviction", toc: "Eviction API",
+      blocks: [
+        { type: "pipeline", stages: [["drain", "cordon node"], ["POST eviction", "pods/eviction subresource"], ["PDB check", "disruptionsAllowed > 0?"], ["Graceful delete", "preStop, SIGTERM"], ["Replacement", "controller recreates elsewhere"]],
+          scenarios: [
+            { label: "Budget allows", notes: ["", "", "allowed: 1", "", ""], out: '<span style="color:var(--green)">✓ 201: eviction accepted</span>' },
+            { label: "Budget exhausted", path: [0, 1, 2], fail: 2, out: '<span style="color:var(--red)">✗ 429 Too Many Requests: Cannot evict pod as it would violate the pod\'s disruption budget. kubectl drain retries</span>' },
+            { label: "Multiple PDBs match", path: [0, 1, 2], fail: 2, out: '<span style="color:var(--red)">✗ 500: This pod has more than one PodDisruptionBudget, which the eviction subresource does not support</span>' }
+          ] },
+        { type: "term", title: "maintenance workflow", lines: [
+          "$ kubectl get pdb -A",
+          "NAMESPACE      NAME   MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS",
+          "gamehub   api    N/A             1                 1",
+          "$ kubectl drain wk1 --ignore-daemonsets --delete-emptydir-data --timeout=10m",
+          "$ # …patch kernel / upgrade kubelet…",
+          "$ kubectl uncordon wk1",
+          "✓ DaemonSet Pods are skipped (they'd come straight back); emptyDir data is lost on eviction"
+        ] }
+      ] },
+    { id: "pressure", title: "Node-pressure eviction", toc: "Node-pressure",
+      lead: "When a node runs low on memory, disk or PIDs, the kubelet evicts Pods itself to protect the node. PDBs are not consulted.",
+      blocks: [
+        { type: "table", head: ["Signal", "Default hard threshold (Linux)", "Node condition"], rows: [
+          ["<code>memory.available</code>", "&lt; 100Mi", "MemoryPressure"],
+          ["<code>nodefs.available</code>", "&lt; 10%", "DiskPressure"],
+          ["<code>imagefs.available</code>", "&lt; 15%", "DiskPressure"],
+          ["<code>nodefs.inodesFree</code>", "&lt; 5%", "DiskPressure"],
+          ["<code>pid.available</code>", "(configurable)", "PIDPressure"]
+        ] },
+        { type: "flow", nodes: [
+          ["📉", "Signal", "Threshold crossed", "kubelet sees memory.available below the threshold and sets MemoryPressure=True (new BestEffort Pods are not scheduled there)."],
+          ["🧹", "Reclaim", "Try node-level reclaim", "For disk: delete dead containers and unused images first."],
+          ["📋", "Rank", "Rank Pods", "Usage above requests first, then Pod priority, then usage relative to requests. BestEffort and over-request Burstable Pods go first."],
+          ["❌", "Evict", "Evict", "Pod phase Failed, reason <code>Evicted</code>. Hard thresholds: no grace period. Soft thresholds: grace period respected."],
+          ["♻️", "Recover", "Controllers replace", "Deployments recreate the Pod elsewhere. The Failed Pod object stays until cleaned up."]
+        ] },
+        { type: "callout", kind: "tip", html: "Separate from eviction: if a container exceeds its <b>own</b> memory limit, the kernel OOM-kills it (<code>OOMKilled</code>, container restart, same Pod). Eviction removes whole Pods because the <b>node</b> is short." }
+      ] },
+    { id: "shutdown", title: "Node shutdown", toc: "Node shutdown",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Graceful node shutdown", chip: "beta, on by default", chipClass: "amber", color: "var(--amber)", items: ["kubelet takes a systemd inhibitor lock and sees the shutdown coming", "Terminates Pods first, critical Pods last", "Configure <code>shutdownGracePeriod</code> and <code>shutdownGracePeriodCriticalPods</code> in kubelet config", "Priority-based tiers with <code>shutdownGracePeriodByPodPriority</code>"] },
+          { title: "Non-graceful shutdown", chip: "manual signal", chipClass: "red", color: "var(--red)", items: ["Node died without warning: StatefulSet Pods stay Terminating, volumes stay attached", "After confirming it's really down, taint it: <code>node.kubernetes.io/out-of-service=nodeshutdown:NoExecute</code>", "Pods are force-deleted and volumes detached so replacements can start", "Remove the taint after the node is fixed"] }
+        ] },
+        { type: "callout", kind: "warn", html: "Only add the out-of-service taint when you are sure the node is powered off. If it's still running, two copies of a StatefulSet Pod can write to the same data." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🛠️", "Voluntary uses the Eviction API", "Drains and autoscalers respect PDBs."],
+      ["🧮", "PDB: minAvailable or maxUnavailable", "Never 0 allowed with 1 replica."],
+      ["🚧", "Drain = cordon + evict", "uncordon after maintenance."],
+      ["💥", "Node-pressure ignores PDBs", "BestEffort and over-request Pods go first."],
+      ["🔪", "OOMKill ≠ eviction", "Container limit vs node shortage."],
+      ["🔌", "Out-of-service taint", "Recover StatefulSets after a dead node."]
+    ],
+    cheat: `kubectl create pdb api --selector=app=api --max-unavailable=1
+kubectl get pdb -A
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+kubectl uncordon <node>
+kubectl get pods -A --field-selector=status.phase=Failed | grep Evicted
+kubectl describe node <node> | grep -A6 Conditions
+kubectl taint node <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute`,
+    quiz: [
+      ["Which disruption does a PDB protect against?", ["Kernel panic", "kubectl drain", "OOMKill", "Node-pressure eviction"], 1, "Only Eviction API calls check PDBs."],
+      ["replicas: 1, minAvailable: 1. Draining the node…", ["Works", "Hangs: no evictions allowed", "Deletes the PDB", "Creates a second replica first"], 1, "disruptionsAllowed is always 0."],
+      ["Memory below 100Mi on a node. Who acts?", ["Scheduler", "kubelet node-pressure eviction", "HPA", "Controller manager"], 1, "Default hard threshold memory.available<100Mi."],
+      ["A dead node holds a StatefulSet Pod and its volume. Safe recovery?", ["kubectl delete node", "Confirm it's off, add the out-of-service taint", "Restart CoreDNS", "Scale to 0"], 1, "Non-graceful node shutdown handling."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

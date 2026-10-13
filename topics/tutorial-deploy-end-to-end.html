@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GameHub End-to-End</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Deploy checklist: progress saved per browser so you can work through it on a real cluster.
+const CHECK = [
+  ["Cluster ready", "kubectl get nodes → all Ready (SKS, kubeadm or kind)"],
+  ["Namespace", "kubectl create ns gamehub"],
+  ["CloudNativePG operator", "kubectl apply --server-side -f cnpg-1.25.2.yaml"],
+  ["init-sql ConfigMap", "kubectl create configmap init-sql --from-file=init.sql -n gamehub"],
+  ["Postgres Cluster", "kubectl apply -f manifests/pgcluster.yaml → 3 instances Ready, Secret postgres-app exists"],
+  ["App Deployments", "auth-deploy.yaml, game-deploy.yaml, frontend.yaml"],
+  ["Services", "auth-service.yaml, game-service.yaml, frontend-service.yaml"],
+  ["cert-manager + gateway-api flag", "cert-manager.yaml, --enable-gateway-api, rollout restart"],
+  ["Gateway API CRDs + kgateway", "standard-install.yaml, two helm installs"],
+  ["DNS record", "A record for your hostname → Gateway address"],
+  ["Issuer, Gateway, Routes", "cluster-issuer.yaml, gateway.yaml, httproute.yaml, httpredirect.yaml"],
+  ["Smoke test", "Open https://<host>, sign up, play Snake, check score persists after deleting a Pod"]
+];
+const chkHtml = `
+<div class="sim glass">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b>Deployment checklist</b><span class="chip" id="cProg"></span></div>
+  <div class="ring" style="height:6px;background:rgba(255,255,255,.08);border-radius:6px;overflow:hidden;margin-bottom:14px"><i id="cBar" style="display:block;height:100%;width:0;background:linear-gradient(90deg,var(--k8s),var(--green));transition:width .5s"></i></div>
+  <div id="cList" style="display:grid;gap:6px"></div>
+</div>`;
+function initChk(el) {
+  const KEY = "k8s-final-demo-checklist";
+  let done = {}; try { done = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
+  const draw = () => {
+    el.querySelector("#cList").innerHTML = CHECK.map((c, i) => `<label class="box" style="display:flex;gap:12px;align-items:flex-start;cursor:pointer;${done[i] ? "border-color:rgba(52,211,153,.5)" : ""}">
+      <input type="checkbox" data-i="${i}" ${done[i] ? "checked" : ""} style="margin-top:4px"><span><b style="${done[i] ? "text-decoration:line-through;color:var(--muted)" : ""}">${i + 1}. ${c[0]}</b><br><span class="faint" style="font:12px var(--mono)">${c[1]}</span></span></label>`).join("");
+    const n = Object.values(done).filter(Boolean).length;
+    el.querySelector("#cProg").textContent = `${n} / ${CHECK.length}`;
+    el.querySelector("#cBar").style.width = n / CHECK.length * 100 + "%";
+    el.querySelectorAll("[data-i]").forEach(c => c.onchange = () => { done[c.dataset.i] = c.checked; try { localStorage.setItem(KEY, JSON.stringify(done)); } catch (e) {} draw(); });
+  };
+  draw();
+}
+
+K8S_RENDER({
+  id: "tut-end-to-end", group: "tutorials", minutes: 25,
+  title: 'Final demo: <span class="grad-text">GameHub end-to-end</span>',
+  lead: "Every topic so far, assembled. Deploy the full stack in dependency order, then follow a single 'save my Snake score' request through every Kubernetes layer you've learned.",
+  parts: [["Big picture", "What runs where"], ["Deploy", "Ordered, with checks"], ["Trace a request", "Every layer, animated"], ["Prove resilience", "Break things on purpose"]],
+  sections: [
+    { id: "picture", title: "The big picture", toc: "Big picture",
+      blocks: [
+        { type: "layers", items: [
+          ["🌍 Internet → DNS k8s2025.example.com", "A record → Gateway LoadBalancer IP", "#67e8f9"],
+          ["🚪 Gateway (kgateway) · TLS via cert-manager", "ns kgateway-system · HTTPRoute + redirect", "#8b5cf6"],
+          ["🖼️ frontend Service → Deployment (nginx + React)", "/api/auth → auth-service:8080 · /api/game → game-service:8081", "#5b8cff"],
+          ["🔐 auth-service · 🎮 game-service (Deployments + ClusterIP Services)", "env from Secret postgres-app · requests/limits set", "#34d399"],
+          ["🐘 CloudNativePG Cluster postgres (3 instances)", "postgres-rw / -ro Services · PVC per instance via CSI", "#fbbf24"],
+          ["⚙️ Nodes: kubelet + containerd + CNI + kube-proxy + CoreDNS", "the platform from the Architecture topics", "#f87171"]
+        ] }
+      ] },
+    { id: "deploy", title: "Deploy in dependency order", toc: "Deploy",
+      lead: "Order matters: the database and its Secret must exist before backends start (or they crash-loop until it does), and DNS must point at the Gateway before the certificate can be issued.",
+      blocks: [
+        { type: "custom", html: chkHtml, init: initChk },
+        { type: "callout", kind: "info", html: "Sample app source and manifests: <a href=\"https://github.com/saiyam1814/Kubernetes-crash-course-2025\" target=\"_blank\" rel=\"noopener\">saiyam1814/Kubernetes-crash-course-2025</a> (MIT License). Start with the <a href=\"tutorial-sample-app.html\">sample app tutorial</a> to see how it's built." },
+        { type: "callout", kind: "info", html: "Versions below (CNPG 1.25.2, cert-manager v1.18.0, Gateway API v1.2.1, kgateway v2.0.1) are the ones the sample manifests were written against. For a new cluster, check each project's releases page and use current versions." },
+        { type: "steps", steps: [
+          { title: "Database first", where: "gamehub", why: "Creates Pods postgres-1..3, Services postgres-rw/ro/r and Secret postgres-app that the apps reference.", code: "kubectl create ns gamehub\nkubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.2.yaml\nkubectl create configmap init-sql --from-file=init.sql=./init.sql -n gamehub\nkubectl apply -f manifests/pgcluster.yaml\nkubectl wait --for=condition=Ready cluster/postgres -n gamehub --timeout=5m" },
+          { title: "Apps and Services", where: "gamehub", why: "Backends read POSTGRES_HOST=postgres-rw.gamehub.svc.cluster.local and credentials from postgres-app.", code: "kubectl apply -f manifests/auth-deploy.yaml -f manifests/game-deploy.yaml -f manifests/frontend.yaml\nkubectl apply -f manifests/auth-service.yaml -f manifests/game-service.yaml -f manifests/frontend-service.yaml\nkubectl rollout status deploy -n gamehub --timeout=3m\nkubectl port-forward svc/frontend 8080:80 -n gamehub    # quick test before going public" },
+          { title: "Edge: cert-manager, Gateway API, kgateway", where: "cluster", whereClass: "violet", why: "Install once per cluster. See the Gateway API topic for details.", code: "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.0/cert-manager.yaml\nkubectl -n cert-manager patch deploy cert-manager --type=json \\\n  -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--enable-gateway-api\"}]'\nkubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml\nhelm upgrade -i --create-namespace -n kgateway-system --version v2.0.1 kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds\nhelm upgrade -i -n kgateway-system --version v2.0.1 kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway" },
+          { title: "Expose with TLS", where: "cluster", whereClass: "violet", why: "Edit the hostname and email to yours. Point DNS at the Gateway address before applying the issuer, or the HTTP-01 challenge fails.", code: "kubectl apply -f manifests/gateway.yaml\nkubectl get gateway gamehub-gateway -n kgateway-system   # ADDRESS → create DNS A record\nkubectl apply -f manifests/cluster-issuer.yaml\nkubectl apply -f manifests/httproute.yaml -f manifests/httpredirect.yaml\nkubectl get certificate -A -w" },
+          { title: "Verify everything", where: "cluster", whereClass: "green", why: "One command per layer.", code: "kubectl get pods,svc,pvc -n gamehub\nkubectl get cluster -n gamehub\nkubectl get gateway,httproute -A\nkubectl get certificate -A\ncurl -I https://<your-host>\nkubectl logs deploy/auth-service -n gamehub --tail=20" }
+        ] }
+      ] },
+    { id: "trace", title: "Trace one request through every layer", toc: "Trace a request",
+      lead: "A logged-in player finishes a Snake game. Press play and watch which Kubernetes feature handles each hop.",
+      blocks: [
+        { type: "flow", interval: 3600, nodes: [
+          ["🌍", "DNS", "Browser resolves the host", "Public DNS returns the Gateway's LoadBalancer IP (provisioned by the cloud-controller-manager; record maybe managed by ExternalDNS)."],
+          ["🔐", "Gateway", "TLS handshake at the Gateway", "kgateway's Envoy presents the Let's Encrypt cert from Secret gamehub-tls (cert-manager). POST /api/game/snake/score over HTTPS."],
+          ["🧭", "HTTPRoute", "Route match", "frontend-route: host matches, PathPrefix / → Service frontend:80. kube-proxy/eBPF DNATs to a ready frontend Pod (readiness probe)."],
+          ["🖼️", "nginx", "nginx proxies /api/game", "Inside the frontend Pod, nginx proxy_pass sends it to <code>game-service:8081</code>. CoreDNS resolves game-service.gamehub.svc.cluster.local."],
+          ["🎮", "game-service", "Flask validates the JWT", "Request lands on a game-service Pod (Deployment, 250m CPU request, 128Mi limit). It checks the token signed by auth-service."],
+          ["🐘", "postgres-rw", "Write to the primary", "game-service connects to postgres-rw (CNPG Service → current primary) with credentials from Secret postgres-app."],
+          ["💽", "PVC", "Durable write", "Postgres writes WAL to its PVC (CSI block volume). Replicas stream the WAL, so the score survives a primary failure."],
+          ["📈", "Metrics", "Observed", "/metrics on port http-metrics is scraped by Prometheus via a ServiceMonitor (next topic). 200 OK returns along the same path."]
+        ] }
+      ] },
+    { id: "chaos", title: "Prove it's resilient", toc: "Resilience",
+      lead: "Kubernetes claims self-healing. Test it. Each experiment maps to a topic.",
+      blocks: [
+        { type: "pipeline", stages: [["Break", "you"], ["Detect", "controller/probe"], ["Heal", "reconcile"], ["Verify", "app still works"]],
+          scenarios: [
+            { label: "Delete a game-service Pod", start: "$ kubectl delete pod -l app=game-service -n gamehub", notes: ["Pod gone", "ReplicaSet sees 0/1", "new Pod scheduled + started", ""], out: '<span style="color:var(--green)">✓ brief errors only if replicas: 1 → set replicas: 2+ and a readinessProbe for zero downtime</span>' },
+            { label: "Kill the Postgres primary", start: "$ kubectl delete pod postgres-1 -n gamehub", notes: ["primary gone", "CNPG operator detects", "promotes replica, repoints postgres-rw", ""], out: '<span style="color:var(--green)">✓ scores still there; apps reconnect to postgres-rw</span>' },
+            { label: "Bad image rollout", start: "$ kubectl set image deploy/frontend frontend=nginx:doesnotexist -n gamehub", notes: ["new Pod ImagePullBackOff", "rollout stalls (maxUnavailable)", "old Pods keep serving", ""], out: '<span style="color:var(--amber)">↺ kubectl rollout undo deploy/frontend -n gamehub</span>' },
+            { label: "Drain a node", start: "$ kubectl drain <node> --ignore-daemonsets --delete-emptydir-data", notes: ["node cordoned, Pods evicted", "controllers see missing Pods", "rescheduled on other nodes; PVCs re-attach", ""], out: '<span style="color:var(--green)">✓ add PodDisruptionBudgets so drains never take all replicas at once · kubectl uncordon &lt;node&gt;</span>' }
+          ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧱", "Layered stack", "DNS → Gateway/TLS → Services → Deployments → DB operator → PVCs."],
+      ["📋", "Dependency order", "Database and Secret first, DNS before certificates."],
+      ["🔤", "Names, not IPs", "Every hop uses Service DNS names."],
+      ["🔑", "Secrets wire credentials", "Operator-generated Secret → secretKeyRef env."],
+      ["🩹", "Self-healing is testable", "Delete Pods, kill primaries, drain nodes, roll back."],
+      ["🧪", "port-forward first", "Verify internally before exposing publicly."]
+    ],
+    cheat: `kubectl get all -n gamehub
+kubectl get cluster,pvc,secret -n gamehub
+kubectl get gateway,httproute,certificate -A
+kubectl logs -f deploy/game-service -n gamehub
+kubectl port-forward svc/frontend 8080:80 -n gamehub
+kubectl rollout undo deploy/<d> -n gamehub
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data`,
+    quiz: [
+      ["Why deploy the database before the backends?", ["Kubernetes requires order", "Backends reference Secret postgres-app and need the DB, otherwise they fail/crash-loop", "To save CPU", "For TLS"], 1, "Missing Secret = CreateContainerConfigError; missing DB = connection errors."],
+      ["Which component turns /api/game into a call to game-service?", ["Gateway", "nginx in the frontend Pod", "CoreDNS", "kube-proxy"], 1, "nginx proxy_pass in frontend's nginx.conf."],
+      ["After killing the Postgres primary, how do apps find the new one?", ["Restart them", "postgres-rw Service is repointed by the operator", "Edit env vars", "DNS TTL expires"], 1, "Stable Service name, changing endpoint."],
+      ["Certificate stays pending. First check?", ["Pod logs", "DNS points to the Gateway and port 80 reachable (Challenge status)", "PVC", "RBAC"], 1, "HTTP-01 must be reachable from the internet."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

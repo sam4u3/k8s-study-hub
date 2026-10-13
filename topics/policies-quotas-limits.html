@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quotas and Limits</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Quota usage meter: create Pods against a ResourceQuota.
+const qHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>Pod CPU request: <b id="qcV">200</b>m<input class="input" type="range" min="50" max="600" step="50" value="200" id="qc"></label>
+    <label>Pod memory request: <b id="qmV">256</b>Mi<input class="input" type="range" min="64" max="1024" step="64" value="256" id="qm"></label>
+  </div>
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="qAdd">kubectl run (create Pod)</button><button class="btn small" id="qDel">delete a Pod</button><button class="btn small" id="qReset">Reset</button></div>
+  <div id="qBars" style="display:grid;gap:8px"></div>
+  <div class="pipe-out" id="qOut"></div>
+</div>`;
+function initQuota(el) {
+  const $ = s => el.querySelector(s);
+  const HARD = { "requests.cpu": 1000, "requests.memory": 2048, pods: 5 };
+  let pods = [];
+  const draw = msg => {
+    const used = { "requests.cpu": pods.reduce((a, p) => a + p.c, 0), "requests.memory": pods.reduce((a, p) => a + p.m, 0), pods: pods.length };
+    $("#qBars").innerHTML = Object.keys(HARD).map(k => { const pct = Math.min(100, used[k] / HARD[k] * 100); const unit = k === "pods" ? "" : k.includes("cpu") ? "m" : "Mi";
+      return `<div style="display:grid;grid-template-columns:150px 1fr 120px;gap:10px;align-items:center;font:12px var(--mono)"><span>${k}</span><div style="height:12px;background:rgba(255,255,255,.06);border-radius:6px;overflow:hidden"><i style="display:block;height:100%;width:${pct}%;background:${pct >= 100 ? "var(--red)" : pct > 75 ? "var(--amber)" : "var(--green)"};transition:width .4s"></i></div><span>${used[k]}${unit} / ${HARD[k]}${unit}</span></div>`; }).join("");
+    if (msg) $("#qOut").innerHTML = msg;
+  };
+  ["qc", "qm"].forEach(i => $("#" + i).oninput = () => $("#" + i + "V").textContent = $("#" + i).value);
+  $("#qAdd").onclick = () => {
+    const c = +$("#qc").value, m = +$("#qm").value;
+    const used = { cpu: pods.reduce((a, p) => a + p.c, 0), mem: pods.reduce((a, p) => a + p.m, 0) };
+    const over = [];
+    if (used.cpu + c > HARD["requests.cpu"]) over.push(`requests.cpu=${c}m, used: ${used.cpu}m, limited: ${HARD["requests.cpu"]}m`);
+    if (used.mem + m > HARD["requests.memory"]) over.push(`requests.memory=${m}Mi, used: ${used.mem}Mi, limited: ${HARD["requests.memory"]}Mi`);
+    if (pods.length + 1 > HARD.pods) over.push(`pods=1, used: ${pods.length}, limited: ${HARD.pods}`);
+    if (over.length) return draw(`<span style="color:var(--red)">✗ Error from server (Forbidden): exceeded quota: team-quota, requested: ${over.join("; ")}</span>`);
+    pods.push({ c, m }); draw(`<span style="color:var(--green)">✓ pod/p${pods.length} created</span>`);
+  };
+  $("#qDel").onclick = () => { if (pods.length) { pods.pop(); draw("pod deleted; quota usage released immediately"); } };
+  $("#qReset").onclick = () => { pods = []; draw('<span class="faint"># ResourceQuota team-quota: requests.cpu 1, requests.memory 2Gi, pods 5</span>'); };
+  $("#qReset").onclick();
+}
+
+K8S_RENDER({
+  id: "policies-quotas", group: "policies", minutes: 20,
+  title: '<span class="grad-text">Policies</span>: ResourceQuota, LimitRange & PID limits',
+  lead: "Policies are guard rails attached to namespaces and nodes. They stop one team or one Pod from consuming everything, and they fill in sensible defaults for Pods that don't specify resources.",
+  parts: [["Quota simulator", "Watch a namespace fill up"], ["Quota & LimitRange", "Totals vs per-object rules"], ["Quota scopes", "Counts, priorities, storage"], ["PID limits", "Fork bombs and reservations"]],
+  sections: [
+    { id: "sim", title: "Quota simulator", toc: "Quota simulator",
+      lead: "A ResourceQuota is checked at admission: the API server rejects a Pod whose requests would push the namespace over its limits. Nothing already running is evicted.",
+      blocks: [{ type: "custom", html: qHtml, init: initQuota }] },
+    { id: "quota", title: "ResourceQuota and LimitRange", toc: "Quotas & limits",
+      lead: "Guard rails per namespace. Both are enforced by admission at create time, before the scheduler ever sees the Pod.",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "ResourceQuota", chip: "namespace total", chipClass: "blue", color: "var(--k8s-2)", items: ["Caps the <b>sum</b> across the namespace: requests.cpu, limits.memory, pods, services, PVCs…", "Exceeded → API rejects with <code>exceeded quota</code>", "If a quota covers cpu/memory, every Pod must declare them"] },
+          { title: "LimitRange", chip: "per object", chipClass: "green", color: "var(--green)", items: ["Min/max per Pod or container", "Injects <b>defaults</b> (default limit, defaultRequest) into containers that omit them", "Prevents one container asking for the whole node"] }
+        ] },
+        { type: "code", title: "resourcequota.yaml + limitrange.yaml (trimmed)", code: `apiVersion: v1
+kind: ResourceQuota
+metadata: {name: example-quota, namespace: example-namespace}
+spec:
+  hard:
+    requests.cpu: "500m"
+    limits.cpu: "1"
+    pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata: {name: example-limitrange, namespace: example-namespace}
+spec:
+  limits:
+  - type: Container
+    default:        {cpu: "100m", memory: 100Mi}   # default LIMIT
+    defaultRequest: {cpu: "100m", memory: 100Mi}   # default REQUEST
+    max:            {cpu: "1",    memory: 1Gi}
+    min:            {cpu: "100m", memory: 100Mi}` },
+        { type: "pipeline", intro: "Apply an oversized Pod (600m CPU request) into example-namespace.",
+          stages: [["RBAC", "allowed"], ["LimitRange", "defaults + min/max"], ["ResourceQuota", "namespace sum"], ["Scheduler", "find a node"]],
+          scenarios: [
+            { label: "pod-oversize.yaml (600m)", path: [0, 1, 2], fail: 2, notes: ["", "within container max 1 CPU ✓"], out: '<span style="color:var(--red)">✗ Error from server (Forbidden): pods "oversized-pod" is forbidden: exceeded quota: example-quota, requested: requests.cpu=600m, limited: requests.cpu=500m</span>' },
+            { label: "Pod with no resources", notes: ["", "defaults injected: 100m / 100Mi", "100m ≤ 500m ✓", ""], out: '<span style="color:var(--green)">✓ created; kubectl get pod -o yaml shows the injected requests/limits</span>' }
+          ] }
+      ] },
+    { id: "scopes", title: "What else a quota can limit", toc: "Quota scopes",
+      blocks: [
+        { type: "table", head: ["Quota key", "Limits"], rows: [
+          ["<code>requests.cpu</code>, <code>limits.memory</code>…", "Sum of compute requests/limits of non-terminal Pods"],
+          ["<code>requests.storage</code>, <code>persistentvolumeclaims</code>", "Total storage requested and number of PVCs"],
+          ["<code>&lt;class&gt;.storageclass.storage.k8s.io/requests.storage</code>", "Storage per StorageClass (e.g. cap expensive SSDs)"],
+          ["<code>requests.ephemeral-storage</code>", "Local ephemeral storage"],
+          ["<code>count/deployments.apps</code>, <code>count/secrets</code>, <code>services.loadbalancers</code>", "Object counts (generic <code>count/&lt;resource&gt;.&lt;group&gt;</code> syntax)"],
+          ["<code>requests.nvidia.com/gpu</code>", "Extended resources such as GPUs"]
+        ] },
+        { type: "code", title: "scoped quota: only high-priority Pods", code: `apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: high-priority
+  namespace: team-a
+spec:
+  hard:
+    pods: "4"
+    requests.cpu: "8"
+  scopeSelector:
+    matchExpressions:
+    - scopeName: PriorityClass
+      operator: In
+      values: ["high"]
+# other scopes: Terminating, NotTerminating, BestEffort, NotBestEffort, CrossNamespacePodAffinity` },
+        { type: "callout", kind: "info", html: "Quota usage is visible with <code>kubectl describe quota -n team-a</code> (Used vs Hard). Combine quotas with a LimitRange so Pods that omit requests still get defaults and are counted." }
+      ] },
+    { id: "pids", title: "Process ID limits and reservations", toc: "PID limits",
+      lead: "PIDs are a node-wide resource. One Pod running a fork bomb can exhaust them and make the node unusable for everyone.",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["🧮", "Pod PID limit", "kubelet <code>podPidsLimit</code> caps processes per Pod (cgroup pids.max). Set it in KubeletConfiguration, e.g. 4096."],
+          ["🖥️", "Node PID reservation", "Reserve PIDs for the OS and kubelet with <code>systemReserved</code>/<code>kubeReserved</code> <code>pid</code> entries."],
+          ["🚨", "PID-based eviction", "<code>evictionHard: pid.available</code> makes the kubelet evict Pods before the node runs out; node gets <code>PIDPressure</code>."]
+        ] },
+        { type: "code", title: "KubeletConfiguration", code: `apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+podPidsLimit: 4096
+systemReserved:
+  pid: "1000"
+kubeReserved:
+  pid: "1000"
+evictionHard:
+  pid.available: "10%"` }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧮", "ResourceQuota = namespace totals", "Checked at admission; over-quota creates are rejected."],
+      ["📏", "LimitRange = per-object rules", "Min/max and injected defaults."],
+      ["🤝", "Use both", "LimitRange defaults make every Pod countable by the quota."],
+      ["🔢", "Object counts", "count/<resource>.<group> caps Deployments, Secrets, LoadBalancers…"],
+      ["🎯", "Scopes", "Quota only high-priority or BestEffort Pods."],
+      ["🧵", "PID limits", "podPidsLimit and pid.available eviction stop fork bombs."]
+    ],
+    cheat: `kubectl create quota team-quota -n team-a --hard=requests.cpu=1,requests.memory=2Gi,pods=5
+kubectl describe quota -n team-a
+kubectl get limitrange -n team-a -o yaml
+kubectl describe ns team-a          # shows quotas and limit ranges
+kubectl get events -n team-a --field-selector reason=FailedCreate`,
+    quiz: [
+      ["A Deployment's Pods would exceed the namespace quota. What happens?", ["Existing Pods are evicted", "New Pods are rejected; the ReplicaSet reports FailedCreate", "Quota is raised", "Pods run without limits"], 1, "Quota is enforced at admission."],
+      ["Quota covers requests.cpu, but a Pod omits CPU requests. Result without a LimitRange?", ["Admitted with 0", "Rejected: must specify requests.cpu", "Default 100m", "Evicted"], 1, "Add a LimitRange with defaultRequest."],
+      ["How do you limit the number of LoadBalancer Services?", ["LimitRange", "ResourceQuota services.loadbalancers", "NetworkPolicy", "RBAC"], 1, "Object count quotas."],
+      ["Which kubelet setting caps processes per Pod?", ["maxPods", "podPidsLimit", "pid.available", "ulimit"], 1, "Enforced via the pids cgroup."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

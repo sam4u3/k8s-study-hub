@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoring and Road Ahead</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// ServiceMonitor matcher: shows why a target is or isn't scraped.
+const smHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>ServiceMonitor label release=<select class="input" id="mRel"><option>prometheus</option><option>kube-prometheus</option><option>none</option></select></label>
+    <label>Prometheus serviceMonitorSelector release=<select class="input" id="pRel"><option>kube-prometheus</option><option>prometheus</option></select></label>
+  </div>
+  <div class="sim-row">
+    <label>Service port name<select class="input" id="pName"><option>http-metrics</option><option>http</option><option>(unnamed)</option></select></label>
+    <label>Service label app=<select class="input" id="sApp"><option>game-service</option><option>auth-service</option><option>frontend</option></select></label>
+  </div>
+  <div class="pipe-out" id="mOut"></div>
+</div>`;
+function initSm(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const mr = $("#mRel").value, pr = $("#pRel").value, pn = $("#pName").value, app = $("#sApp").value;
+    const checks = [
+      [mr === pr, `Prometheus selects ServiceMonitors with release=${pr}; this one has release=${mr}`],
+      [["game-service", "auth-service"].includes(app), `ServiceMonitor selector: app In (auth-service, game-service); Service has app=${app}`],
+      [pn === "http-metrics", `endpoints[].port: http-metrics must match a <b>named</b> Service port; found "${pn}"`]
+    ];
+    $("#mOut").innerHTML = checks.map(([ok, t]) => `${ok ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>'} ${t}`).join("<br>") +
+      "<br>" + (checks.every(c => c[0]) ? '<b style="color:var(--green)">Target UP: scraping /metrics every 15s</b>' : '<b style="color:var(--red)">No target in Prometheus → Status → Targets</b>');
+  };
+  el.querySelectorAll("select").forEach(s => s.onchange = go); go();
+}
+
+// Learning roadmap
+const RM = [
+  ["🎓", "Certify", "CKA (admin), CKAD (developer), CKS (security). Hands-on, terminal-based exams; this hub's setup, architecture and cluster-administration topics cover much of CKA's cluster section."],
+  ["📦", "Package", "Helm charts and Kustomize overlays for repeatable installs across environments."],
+  ["🔁", "GitOps", "Argo CD or Flux: Git is the source of truth; the cluster reconciles to it, just like a controller."],
+  ["📈", "Autoscale", "HPA on CPU/custom metrics, VPA for right-sizing, Cluster Autoscaler / Karpenter for nodes, KEDA for event-driven scaling."],
+  ["🛡️", "Harden", "Pod Security Admission, NetworkPolicies, image signing (Sigstore/cosign), Kyverno or Gatekeeper policies, runtime security (Falco)."],
+  ["🕸️", "Mesh & eBPF", "Cilium for networking/observability, Istio or Linkerd for mTLS, retries and traffic shaping."],
+  ["🧩", "Extend", "Write CRDs and operators with kubebuilder or Operator SDK: the CNPG pattern for your own apps."],
+  ["🔭", "Observe more", "Logs (Loki), traces (OpenTelemetry + Tempo/Jaeger), SLOs and alert routing."]
+];
+
+K8S_RENDER({
+  id: "admin-monitoring", group: "admin", minutes: 20,
+  title: '<span class="grad-text">Monitoring</span> GameHub & the road ahead',
+  lead: "A cluster you can't see is a cluster you can't run. kube-prometheus-stack gives you Prometheus, Grafana and alerting in one Helm chart. Then: what to learn next.",
+  parts: [["The stack", "What gets installed"], ["Install", "Helm + Grafana"], ["Scrape your app", "ServiceMonitor"], ["Useful queries", "PromQL starters"], ["Road ahead", "What to learn next"]],
+  sections: [
+    { id: "stack", title: "What kube-prometheus-stack installs", toc: "The stack",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["🧠", "Prometheus Operator", "Manages Prometheus/Alertmanager from CRDs: <code>ServiceMonitor</code>, <code>PodMonitor</code>, <code>PrometheusRule</code>."],
+          ["📈", "Prometheus", "Pull-based time-series DB. Scrapes <code>/metrics</code> endpoints on an interval."],
+          ["📊", "Grafana", "Dashboards (cluster, nodes, Pods, workloads preloaded) on top of Prometheus."],
+          ["🔔", "Alertmanager", "Groups, dedupes and routes alerts to Slack, email, PagerDuty."],
+          ["🖥️", "node-exporter", "DaemonSet: CPU, memory, disk, network per node."],
+          ["📋", "kube-state-metrics", "Object state as metrics: replicas desired vs available, Pod phases, restarts."]
+        ] },
+        { type: "flow", nodes: [
+          ["🎮", "App", "game-service exposes /metrics", "The Flask app uses a Prometheus client library to expose counters and histograms on its port 8081."],
+          ["🏷️", "Service", "Service with a named port", "<code>ports: - name: http-metrics, port: 8081</code> plus labels app=game-service, release=prometheus."],
+          ["🔎", "ServiceMonitor", "ServiceMonitor selects it", "Matches Services by label and namespace, names the port and path, sets the interval."],
+          ["⚙️", "Operator", "Operator writes scrape config", "Prometheus Operator turns ServiceMonitors into Prometheus scrape configuration and reloads it."],
+          ["📥", "Scrape", "Prometheus scrapes", "Every 15 s Prometheus GETs each endpoint (Pod IP:8081/metrics) found via the Service's EndpointSlices."],
+          ["📊", "Visualise", "Grafana + alerts", "Dashboards query Prometheus; PrometheusRules fire alerts through Alertmanager."]
+        ] }
+      ] },
+    { id: "install", title: "Install and open Grafana", toc: "Install",
+      blocks: [
+        { type: "term", title: "install", lines: [
+          "$ helm repo add prometheus-community https://prometheus-community.github.io/helm-charts",
+          "$ helm repo update",
+          "$ helm install kube-prometheus prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace",
+          "$ kubectl get pods -n monitoring",
+          "$ kubectl get secret -n monitoring kube-prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo",
+          "$ kubectl port-forward -n monitoring svc/kube-prometheus-grafana 3000:80",
+          "# open http://localhost:3000  (user admin)",
+          "$ kubectl port-forward -n monitoring svc/kube-prometheus-kube-prome-prometheus 9090",
+          "# open http://localhost:9090/targets",
+          "✓ Grafana → Dashboards → Kubernetes / Compute Resources / Namespace (Pods)"
+        ] },
+        { type: "callout", kind: "warn", html: "Service and Secret names depend on the Helm release name. List them with <code>kubectl get svc,secret -n monitoring</code>. Don't expose Grafana publicly with the default admin password; put it behind an HTTPRoute with auth or keep it on port-forward." }
+      ] },
+    { id: "scrape", title: "Scrape GameHub with a ServiceMonitor", toc: "Scrape your app",
+      blocks: [
+        { type: "yaml", title: "servicemonitor.yaml", lines: [
+          ["apiVersion: monitoring.coreos.com/v1", "CRD installed by the chart."],
+          ["kind: ServiceMonitor", ""],
+          ["metadata:", ""],
+          ["  name: gamehub-monitor", ""],
+          ["  namespace: gamehub", ""],
+          ["  labels:", ""],
+          ["    release: prometheus", "<b>Must match the Prometheus resource's serviceMonitorSelector.</b> By default the chart selects <code>release: &lt;helm release name&gt;</code>. Release <code>kube-prometheus</code> → label must be <code>release: kube-prometheus</code>. Mismatch = silently ignored."],
+          ["spec:", ""],
+          ["  namespaceSelector:", ""],
+          ["    matchNames: [gamehub]", "Which namespaces to look in for Services."],
+          ["  selector:", ""],
+          ["    matchExpressions:", ""],
+          ["    - {key: app, operator: In, values: [auth-service, game-service]}", "Which Services (by label) to scrape."],
+          ["  endpoints:", ""],
+          ["  - port: http-metrics", "<b>Name</b> of the Service port, not a number. That's why the sample app's Services name their ports."],
+          ["    interval: 15s", ""],
+          ["    path: /metrics", ""]
+        ] },
+        { type: "h3", text: "Why isn't my target showing up?" },
+        { type: "custom", html: smHtml, init: initSm }
+      ] },
+    { id: "promql", title: "Useful PromQL starters", toc: "Useful queries",
+      blocks: [
+        { type: "table", head: ["Question", "PromQL"], rows: [
+          ["CPU used per Pod in gamehub", "<code>sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"gamehub\"}[5m]))</code>"],
+          ["Memory vs limit", "<code>sum by (pod) (container_memory_working_set_bytes{namespace=\"gamehub\"}) / sum by (pod) (kube_pod_container_resource_limits{resource=\"memory\",namespace=\"gamehub\"})</code>"],
+          ["Restarts in the last hour", "<code>increase(kube_pod_container_status_restarts_total{namespace=\"gamehub\"}[1h]) &gt; 0</code>"],
+          ["Deployments not fully available", "<code>kube_deployment_status_replicas_available != kube_deployment_spec_replicas</code>"],
+          ["Request rate (if the app exports it)", "<code>sum by (service) (rate(http_requests_total{namespace=\"gamehub\"}[5m]))</code>"],
+          ["Node disk almost full", "<code>node_filesystem_avail_bytes / node_filesystem_size_bytes &lt; 0.1</code>"]
+        ] },
+        { type: "code", title: "alert rule", code: `apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gamehub-alerts
+  namespace: gamehub
+  labels:
+    release: kube-prometheus
+spec:
+  groups:
+  - name: gamehub
+    rules:
+    - alert: GameHubPodCrashLooping
+      expr: increase(kube_pod_container_status_restarts_total{namespace="gamehub"}[15m]) > 3
+      for: 5m
+      labels: {severity: warning}
+      annotations:
+        summary: "{{ $labels.pod }} restarted more than 3 times in 15m"` }
+      ] },
+    { id: "road", title: "What to learn next", toc: "Road ahead",
+      lead: "Once you can build a cluster, deploy a multi-service app with a replicated database, expose it with TLS and observe it, these are the next layers professionals add.",
+      blocks: [
+        { type: "cards", cols: 4, items: RM },
+        { type: "timeline", items: [
+          ["Weeks 1–2", "Rebuild from scratch", "Redo the final demo on kind, then on a kubeadm cluster without looking. Break and fix it."],
+          ["Weeks 3–4", "Package and automate", "Turn GameHub into a Helm chart; deploy it with Argo CD from Git."],
+          ["Month 2", "Scale and secure", "Add HPA, PDBs, NetworkPolicies, Pod Security 'restricted', and resource quotas."],
+          ["Month 3", "Certify", "CKA or CKAD. Practice speed with imperative commands and kubectl explain."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📦", "One chart, full stack", "Prometheus, Grafana, Alertmanager, exporters, operator."],
+      ["🔎", "ServiceMonitor by labels", "Release label + Service label + named port must all match."],
+      ["📊", "kube-state-metrics", "Desired vs actual state as metrics."],
+      ["🔔", "PrometheusRule", "Alerts as Kubernetes objects."],
+      ["🔐", "Keep Grafana private", "port-forward or authenticated route."],
+      ["🧭", "Next: GitOps, autoscaling, security", "Then certify (CKA/CKAD/CKS)."]
+    ],
+    cheat: `helm install kube-prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
+kubectl get prometheus -n monitoring -o jsonpath='{.items[0].spec.serviceMonitorSelector}'
+kubectl get servicemonitor,prometheusrule -A
+kubectl port-forward -n monitoring svc/<grafana-svc> 3000:80
+kubectl port-forward -n monitoring svc/<prometheus-svc> 9090
+kubectl top pods -n gamehub      # needs metrics-server`,
+    quiz: [
+      ["ServiceMonitor exists but no target appears. Most likely?", ["Wrong image", "Its labels don't match Prometheus's serviceMonitorSelector", "Grafana is down", "Missing PVC"], 1, "The operator ignores ServiceMonitors it isn't told to select."],
+      ["endpoints.port in a ServiceMonitor refers to…", ["containerPort number", "The name of a Service port", "nodePort", "Pod name"], 1, "Name your Service ports."],
+      ["Which component exposes 'desired vs available replicas'?", ["node-exporter", "kube-state-metrics", "Alertmanager", "Grafana"], 1, "It turns object state into metrics."],
+      ["Prometheus collects metrics by…", ["Apps pushing to it", "Scraping HTTP endpoints on an interval", "Reading etcd", "kubectl logs"], 1, "Pull model (Pushgateway only for batch jobs)."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

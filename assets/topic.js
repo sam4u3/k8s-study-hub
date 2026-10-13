@@ -1,9 +1,7 @@
 /* Data-driven renderer for topic pages.
-   A page calls K8S_RENDER({ id, group, title, lead, minutes, video, repo, parts, sections, summary }).
+   A page calls K8S_RENDER({ id, group, title, lead, minutes, parts, sections, summary, docs? }).
    Each section has { id, title, lead, blocks: [...] }; block types are documented in WIDGETS below. */
 (function () {
-  const VIDEO = "https://www.youtube.com/watch?v=_4uQI4ihGVU";
-  const REPO = "https://github.com/saiyam1814/Kubernetes-crash-course-2025";
   const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   // Highlight shell and YAML: comments, keys, quoted strings. Input is raw text.
@@ -151,7 +149,7 @@
     const btns = [...list.children];
     btns.forEach((b, i) => b.onclick = () => go(i));
     function go(i) {
-      cur = i; seen.add(i);
+      cur = i; seen.add(i); host.dataset.cur = i;
       btns.forEach((b, j) => { b.classList.toggle("on", j === i); b.classList.toggle("seen", seen.has(j) && j !== i); });
       bar.style.width = ((i + 1) / steps.length * 100) + "%";
       const s = steps[i];
@@ -165,7 +163,8 @@
       K8S.initCopy(pane);
       if (list.scrollWidth > list.clientWidth + 4 && getComputedStyle(list).display === "flex") list.scrollTo({ left: btns[i].offsetLeft - 20, behavior: "smooth" });
     }
-    go(0);
+    // Re-rendering the same host (e.g. after a version change) keeps the current step.
+    go(Math.min(+host.dataset.cur || 0, steps.length - 1));
   }
 
   function flow(host, b) {
@@ -296,8 +295,6 @@
     document.title = document.title || P.title.replace(/<[^>]+>/g, "");
     const secs = P.sections.concat([{ id: "summary", title: "Summary", lead: P.summaryLead || "Key ideas, a cheat sheet and a quick self-check." }]);
     const toc = secs.map((s, i) => `<a data-spy href="#${s.id}"><span class="num">${i + 1}</span>${s.toc || s.title}</a>`).join("");
-    const vid = P.video != null ? `<a class="btn small" target="_blank" rel="noopener" href="${VIDEO}&t=${P.video}s">▶ Course chapter${P.videoLabel ? " · " + P.videoLabel : ""}</a>` : "";
-    const repo = P.repo ? `<a class="btn small" target="_blank" rel="noopener" href="${REPO}/tree/main/${P.repo}">📁 Course manifests: ${P.repo}</a>` : "";
     // Official docs links: page data wins, else the registry entry for this topic.
     const reg = (window.K8S_TOPICS || []).find(t => t.id === P.id) || {};
     const docs = (P.docs || reg.docs || []).map(([label, path]) => `<a class="btn small" target="_blank" rel="noopener" href="${path.startsWith("http") ? path : "https://kubernetes.io/docs/" + path}">📘 ${label}</a>`).join("");
@@ -316,7 +313,7 @@
             <div class="chips"><span class="chip blue">${g.icon} ${g.title}</span>${P.minutes ? `<span class="chip">≈ ${P.minutes} min</span>` : ""}<span class="chip violet" id="doneChip" style="display:none">✓ Completed</span></div>
             <h1>${P.title}</h1><p>${P.lead}</p>
             ${P.parts ? `<div class="parts">${P.parts.map((p, i) => `<div class="part"><b>${i + 1} · ${p[0]}</b>${p[1]}</div>`).join("")}</div>` : ""}
-            <div class="ref">${vid}${repo}${docs}</div>
+            <div class="ref">${docs}</div>
           </div>
           ${body}
         </main>
@@ -326,5 +323,6 @@
     K8S.initAll();
   };
   window.K8S_HL = hl;
+  window.K8S_STEPPER = stepper;
   window.K8S_CODE = codeBox;
 })();

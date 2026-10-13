@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jobs and CronJobs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Job simulator with completions, parallelism, failure rate and backoffLimit.
+const jobHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>completions: <b id="jcV">6</b><input class="input" type="range" min="1" max="12" value="6" id="jc"></label>
+    <label>parallelism: <b id="jpV">2</b><input class="input" type="range" min="1" max="6" value="2" id="jp"></label>
+    <label>failure chance: <b id="jfV">20</b>%<input class="input" type="range" min="0" max="90" step="10" value="20" id="jf"></label>
+    <label>backoffLimit: <b id="jbV">6</b><input class="input" type="range" min="0" max="10" value="6" id="jb"></label>
+  </div>
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="jRun">▶ kubectl apply -f job.yaml</button><span class="chip" id="jStat"></span></div>
+  <div id="jPods" style="display:flex;flex-wrap:wrap;gap:6px;min-height:34px"></div>
+  <div class="pipe-out" id="jOut" style="max-height:150px;overflow:auto"></div>
+</div>`;
+function initJob(el) {
+  const $ = s => el.querySelector(s);
+  let timer;
+  ["jc", "jp", "jf", "jb"].forEach(id => $("#" + id).oninput = () => { $("#" + id + "V").textContent = $("#" + id).value; });
+  $("#jRun").onclick = () => {
+    clearInterval(timer);
+    const C = +$("#jc").value, P = +$("#jp").value, F = +$("#jf").value / 100, B = +$("#jb").value;
+    let ok = 0, failed = 0, running = [], pods = [], t = 0, n = 0;
+    $("#jOut").innerHTML = `<span class="faint">completions ${C} · parallelism ${P} · backoffLimit ${B}</span>`;
+    const log = m => { $("#jOut").innerHTML += "<br>" + m; $("#jOut").scrollTop = 1e6; };
+    const draw = () => {
+      $("#jPods").innerHTML = pods.map(p => `<span class="pill ${p.s === "ok" ? "g" : p.s === "fail" ? "r" : "a glow"}">${p.name} ${p.s === "ok" ? "✓" : p.s === "fail" ? "✗" : "◌"}</span>`).join("");
+      $("#jStat").textContent = `Succeeded ${ok}/${C} · Failed ${failed} · Active ${running.length}`;
+    };
+    timer = setInterval(() => {
+      t++;
+      running.forEach(p => { if (Math.random() < 0.6) { if (Math.random() < F) { p.s = "fail"; failed++; log(`${p.name} exited 1 (failure ${failed})`); } else { p.s = "ok"; ok++; } } });
+      running = running.filter(p => p.s === "run");
+      if (failed > B) { clearInterval(timer); running.forEach(p => p.s = "fail"); running = []; draw(); log(`<span style="color:var(--red)">✗ Job failed: BackoffLimitExceeded (${failed} failures > backoffLimit ${B}); active Pods terminated</span>`); return; }
+      if (ok >= C) { clearInterval(timer); draw(); log(`<span style="color:var(--green)">✓ Job complete: ${C}/${C} succeeded in ${t} ticks (${failed} retries). condition Complete=True</span>`); return; }
+      while (running.length < Math.min(P, C - ok)) { const p = { name: `pi-${(++n).toString(36)}`, s: "run" }; running.push(p); pods.push(p); }
+      if (pods.length > 40) pods = pods.slice(-40);
+      draw();
+    }, 600);
+  };
+}
+
+// Cron schedule explainer: computes next runs for 5-field cron in a chosen timezone offset.
+const cronHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>schedule<input class="input" id="cx" value="*/15 9-17 * * 1-5" spellcheck="false" style="font-family:var(--mono)"></label>
+  </div>
+  <div class="ctrl" style="margin:-4px 0 12px">${[["*/15 9-17 * * 1-5", "every 15 min, work hours"], ["0 2 * * *", "nightly 02:00"], ["30 6 1 * *", "monthly"], ["0 */6 * * *", "every 6 h"], ["@hourly", "@hourly"]].map(c => `<button class="btn small" data-c="${c[0]}">${c[1]}</button>`).join("")}</div>
+  <div class="pipe-out" id="cOut"></div>
+</div>`;
+function cronNext(expr, count) {
+  const mac = { "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *" };
+  expr = mac[expr.trim()] || expr.trim();
+  const f = expr.split(/\s+/); if (f.length !== 5) throw new Error("need 5 fields: minute hour day-of-month month day-of-week");
+  const rng = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+  const parse = (s, [lo, hi]) => { const set = new Set(); s.split(",").forEach(part => { let [r, st] = part.split("/"); st = st ? +st : 1; let a = lo, b = hi; if (r !== "*") { const m = r.split("-"); a = +m[0]; b = m[1] !== undefined ? +m[1] : (part.includes("/") ? hi : a); } if ([a, b, st].some(isNaN) || a < lo || b > hi) throw new Error("bad field: " + s); for (let v = a; v <= b; v += st) set.add(v); }); return set; };
+  const [mi, ho, dm, mo, dw] = f.map((x, i) => parse(x, rng[i]));
+  const out = []; const d = new Date(); d.setSeconds(0, 0); d.setMinutes(d.getMinutes() + 1);
+  for (let i = 0; i < 600000 && out.length < count; i++) {
+    const domR = f[2] === "*", dowR = f[4] === "*";
+    const dayOk = (domR || dowR) ? (dm.has(d.getDate()) && dw.has(d.getDay())) : (dm.has(d.getDate()) || dw.has(d.getDay()));
+    if (mi.has(d.getMinutes()) && ho.has(d.getHours()) && mo.has(d.getMonth() + 1) && dayOk) out.push(new Date(d));
+    d.setMinutes(d.getMinutes() + 1);
+  }
+  return out;
+}
+function initCron(el) {
+  const x = el.querySelector("#cx"), o = el.querySelector("#cOut");
+  const go = () => {
+    try { const n = cronNext(x.value, 5); o.innerHTML = `<span class="faint">next runs (your browser's time zone; set spec.timeZone in the CronJob to be explicit)</span><br>` + n.map(d => d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })).join("<br>"); }
+    catch (e) { o.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`; }
+  };
+  x.oninput = go;
+  el.querySelectorAll("[data-c]").forEach(b => b.onclick = () => { x.value = b.dataset.c; go(); });
+  go();
+}
+
+K8S_RENDER({
+  id: "workloads-jobs", group: "workloads", minutes: 25,
+  title: '<span class="grad-text">Jobs</span> & <span class="grad-text">CronJobs</span>',
+  lead: "Deployments keep things running forever. Jobs run things until they finish: migrations, backups, reports, batch and ML work. CronJobs create Jobs on a schedule.",
+  parts: [["Job basics", "completions & parallelism"], ["Simulator", "Retries and backoff"], ["Indexed & policies", "Failure and success rules"], ["CronJob", "Schedules, history, concurrency"], ["Cleanup", "TTL and history limits"]],
+  sections: [
+    { id: "basics", title: "Job basics", toc: "Job basics",
+      blocks: [
+        { type: "yaml", title: "job.yaml", lines: [
+          ["apiVersion: batch/v1", ""],
+          ["kind: Job", ""],
+          ["metadata:", ""],
+          ["  name: pi", ""],
+          ["spec:", ""],
+          ["  completions: 6", "How many Pods must <b>succeed</b>. Default 1."],
+          ["  parallelism: 2", "Max Pods running at once. Default 1."],
+          ["  backoffLimit: 6", "Retries before the Job is marked Failed (default <b>6</b>). Retry delay grows exponentially: 10 s, 20 s, 40 s… capped at 6 min."],
+          ["  activeDeadlineSeconds: 600", "Hard wall-clock limit for the whole Job, regardless of retries."],
+          ["  ttlSecondsAfterFinished: 3600", "Delete the Job (and its Pods) 1 h after it finishes. Stable since v1.23."],
+          ["  template:", ""],
+          ["    spec:", ""],
+          ["      restartPolicy: Never", "<b>Must be Never or OnFailure.</b> Never = new Pod per retry (logs kept). OnFailure = restart container in the same Pod."],
+          ["      containers:", ""],
+          ["      - name: pi", ""],
+          ["        image: perl:5.34", ""],
+          ["        command: [\"perl\", \"-Mbignum=bpi\", \"-wle\", \"print bpi(2000)\"]", "Exit 0 = success; non-zero = failure counted against backoffLimit."]
+        ] },
+        { type: "table", head: ["Pattern", "completions", "parallelism", "Example"], rows: [
+          ["Single task", "1", "1", "DB migration before a release"],
+          ["Fixed count", "N", "M", "Render N video chunks, M at a time"],
+          ["Work queue", "unset", "M", "Workers pull from a queue until it's empty; Job succeeds when any Pod exits 0 and all have stopped"],
+          ["Indexed", "N + <code>completionMode: Indexed</code>", "M", "Each Pod gets <code>JOB_COMPLETION_INDEX</code> 0…N-1 to pick its shard"]
+        ] }
+      ] },
+    { id: "sim", title: "Job simulator", toc: "Simulator",
+      lead: "Raise the failure chance or lower backoffLimit and watch the Job fail. Raise parallelism and watch it finish faster.",
+      blocks: [{ type: "custom", html: jobHtml, init: initJob }] },
+    { id: "policies", title: "Indexed Jobs and failure/success policies", toc: "Indexed & policies",
+      lead: "Recent releases made Jobs much smarter about which failures matter. All of these are stable (GA).",
+      blocks: [
+        { type: "table", head: ["Feature", "Field", "Stable since", "What it does"], rows: [
+          ["Indexed completion", "<code>completionMode: Indexed</code>", "v1.24", "Pods get a stable index (env + hostname); one success needed per index"],
+          ["Pod failure policy", "<code>podFailurePolicy</code>", "v1.31", "Fail fast on certain exit codes, or ignore disruptions (evictions, preemption) so they don't count"],
+          ["Backoff limit per index", "<code>backoffLimitPerIndex</code>, <code>maxFailedIndexes</code>", "v1.33", "Each index retries independently; one bad shard doesn't kill the rest"],
+          ["Success policy", "<code>successPolicy</code>", "v1.33", "Declare success early, e.g. when index 0 (the leader) succeeds"],
+          ["Pod replacement policy", "<code>podReplacementPolicy: Failed</code>", "v1.34", "Create the replacement only after the old Pod fully terminated (no overlap)"],
+          ["External management", "<code>managedBy</code>", "v1.35", "Hand the Job to another controller (e.g. MultiKueue across clusters)"]
+        ] },
+        { type: "code", title: "podFailurePolicy + backoffLimitPerIndex", code: `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shard-train
+spec:
+  completions: 8
+  parallelism: 4
+  completionMode: Indexed
+  backoffLimitPerIndex: 2        # each shard may retry twice
+  maxFailedIndexes: 1            # tolerate one failed shard
+  podFailurePolicy:
+    rules:
+    - action: FailJob            # bug in code: don't waste retries
+      onExitCodes:
+        containerName: train
+        operator: In
+        values: [42]
+    - action: Ignore             # node drained / preempted: not the app's fault
+      onPodConditions:
+      - type: DisruptionTarget
+  template:
+    spec:
+      restartPolicy: Never       # required for podFailurePolicy
+      containers:
+      - name: train
+        image: ghcr.io/example/train:1.0
+        command: ["python", "train.py", "--shard=$(JOB_COMPLETION_INDEX)"]` }
+      ] },
+    { id: "cron", title: "CronJobs", toc: "CronJob",
+      blocks: [
+        { type: "yaml", title: "cronjob.yaml (nightly DB backup)", lines: [
+          ["apiVersion: batch/v1", ""],
+          ["kind: CronJob", ""],
+          ["metadata:", ""],
+          ["  name: pg-backup", ""],
+          ["spec:", ""],
+          ["  schedule: \"0 2 * * *\"", "Standard 5-field cron: minute hour day-of-month month day-of-week. Macros like <code>@daily</code> work."],
+          ["  timeZone: \"Europe/Zurich\"", "IANA time zone (stable since v1.27). Without it, the kube-controller-manager's local time zone is used."],
+          ["  concurrencyPolicy: Forbid", "<b>Allow</b> (default) runs overlapping Jobs; <b>Forbid</b> skips a run if the last is still going; <b>Replace</b> kills the old one."],
+          ["  startingDeadlineSeconds: 300", "If the controller was down and missed the time by more than 5 min, skip that run instead of starting late."],
+          ["  successfulJobsHistoryLimit: 3", "Keep the last 3 successful Jobs (default 3)."],
+          ["  failedJobsHistoryLimit: 1", "Keep the last failed Job for debugging (default 1)."],
+          ["  suspend: false", "Set true to pause scheduling without deleting anything."],
+          ["  jobTemplate:", "A full Job spec: backoffLimit, ttl, Pod template…"],
+          ["    spec:", ""],
+          ["      template:", ""],
+          ["        spec:", ""],
+          ["          restartPolicy: OnFailure", ""],
+          ["          containers:", ""],
+          ["          - name: dump", ""],
+          ["            image: postgres:16", ""],
+          ["            command: [\"sh\", \"-c\", \"pg_dump $DATABASE_URL | gzip > /backup/$(date +%F).sql.gz\"]", "Make it idempotent: CronJobs are 'at least once', a run can occasionally happen twice."]
+        ] },
+        { type: "h3", text: "Schedule explainer" },
+        { type: "custom", html: cronHtml, init: initCron },
+        { type: "term", title: "operate", lines: [
+          "$ kubectl create cronjob pg-backup --image=postgres:16 --schedule='0 2 * * *' -- sh -c 'pg_dump …'",
+          "$ kubectl get cronjob,job,pods -l job-name",
+          "$ kubectl create job --from=cronjob/pg-backup manual-backup-1   # run now",
+          "$ kubectl patch cronjob pg-backup -p '{\"spec\":{\"suspend\":true}}'",
+          "$ kubectl logs job/manual-backup-1",
+          "$ kubectl wait --for=condition=complete job/manual-backup-1 --timeout=10m"
+        ] }
+      ] },
+    { id: "cleanup", title: "Cleanup and gotchas", toc: "Cleanup",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["🧹", "TTL after finished", "Finished Jobs and their Pods pile up forever by default. Set <code>ttlSecondsAfterFinished</code> or rely on CronJob history limits."],
+          ["⏱️", "Don't hang forever", "Use <code>activeDeadlineSeconds</code>. A Pod waiting on a dead dependency never fails on its own."],
+          ["🔁", "Idempotency", "Retries and rare double runs happen. Write jobs that are safe to run twice."],
+          ["📦", "Sidecars", "A native sidecar (initContainer with restartPolicy: Always) is stopped automatically when the main container finishes, so the Job can complete."],
+          ["🏷️", "Find Pods", "Job Pods carry <code>batch.kubernetes.io/job-name</code> and <code>controller-uid</code> labels."],
+          ["⏸️", "suspend", "Create a Job with <code>suspend: true</code> and let a queue (Kueue) start it when quota frees up."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🏁", "Run to completion", "Jobs succeed when enough Pods exit 0."],
+      ["⚖️", "completions × parallelism", "Total work vs concurrency."],
+      ["🔢", "Indexed Jobs", "Stable index per Pod for sharded work."],
+      ["🧠", "Smart failure handling", "podFailurePolicy, backoffLimitPerIndex, successPolicy are GA."],
+      ["⏰", "CronJob = Job factory", "schedule, timeZone, concurrencyPolicy, history limits."],
+      ["🧹", "Clean up", "ttlSecondsAfterFinished and idempotent jobs."]
+    ],
+    cheat: `kubectl create job hello --image=busybox -- echo hi
+kubectl create cronjob tick --image=busybox --schedule='*/5 * * * *' -- date
+kubectl create job --from=cronjob/tick tick-now
+kubectl get jobs -w; kubectl describe job hello
+kubectl logs -l batch.kubernetes.io/job-name=hello
+kubectl wait --for=condition=complete job/hello --timeout=5m
+kubectl delete jobs --field-selector status.successful=1`,
+    quiz: [
+      ["Which restartPolicy values are valid in a Job Pod template?", ["Always", "Never or OnFailure", "Any", "Only Never"], 1, "Always would never let the Job finish."],
+      ["Default backoffLimit?", ["0", "3", "6", "Unlimited"], 2, "Six retries with exponential backoff."],
+      ["How do you skip overlapping CronJob runs?", ["suspend: true", "concurrencyPolicy: Forbid", "parallelism: 1", "startingDeadlineSeconds"], 1, "Forbid skips the new run while the previous is active."],
+      ["A preemption should not count as a failure. Use…", ["backoffLimit: 100", "podFailurePolicy with action Ignore on DisruptionTarget", "OnFailure", "activeDeadlineSeconds"], 1, "Pod failure policy distinguishes infrastructure disruptions."],
+      ["Run a CronJob immediately for testing?", ["kubectl run cronjob", "kubectl create job --from=cronjob/<name> <job>", "Edit the schedule to now", "kubectl rollout restart"], 1, "Creates a Job from the template."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

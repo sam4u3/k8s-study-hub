@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DaemonSets and StatefulSets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+const dsHtml = `
+<div class="sim glass">
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="dsAdd">+ Add node</button><button class="btn small" id="dsDel">− Remove node</button><label class="faint" style="font-size:13px"><input type="checkbox" id="dsTol"> toleration for control-plane taint</label></div>
+  <div id="dsNodes" style="display:flex;flex-wrap:wrap;gap:10px"></div>
+  <div class="pipe-out" id="dsOut"></div>
+</div>`;
+function initDs(el) {
+  const $ = s => el.querySelector(s);
+  let nodes = ["controlplane", "node01", "node02"], n = 3;
+  const draw = msg => {
+    const tol = $("#dsTol").checked;
+    $("#dsNodes").innerHTML = nodes.map(x => {
+      const cp = x === "controlplane", has = !cp || tol;
+      return `<div class="box fadein" style="min-width:130px"><b style="font-size:13px">${cp ? "🧠" : "⚙️"} ${x}</b><div style="margin-top:8px">${has ? '<span class="pill g glow">nginx-ds ●</span>' : '<span class="pill r">tainted: skipped</span>'}</div></div>`;
+    }).join("");
+    const desired = nodes.filter(x => x !== "controlplane" || tol).length;
+    $("#dsOut").innerHTML = (msg ? msg + "<br>" : "") + `<span class="faint">$ kubectl get ds nginx-daemonset</span><br>DESIRED ${desired}   CURRENT ${desired}   READY ${desired}`;
+  };
+  $("#dsAdd").onclick = () => { nodes.push("node0" + n++); draw(`node ${nodes[nodes.length - 1]} joined → DaemonSet controller creates a Pod on it`); };
+  $("#dsDel").onclick = () => { if (nodes.length > 1) { const r = nodes.pop(); draw(`node ${r} removed → its DaemonSet Pod is garbage-collected`); } };
+  $("#dsTol").onchange = () => draw($("#dsTol").checked ? "toleration added → Pod now also runs on the control plane" : "toleration removed");
+  draw();
+}
+
+const stsHtml = `
+<div class="sim glass">
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="sUp">Scale to 3</button><button class="btn small" id="sDown">Scale to 1</button><button class="btn small" id="sKill">Delete postgres-1</button><select class="input" id="sPol" style="width:auto"><option value="OrderedReady">OrderedReady</option><option value="Parallel">Parallel</option></select></div>
+  <div id="sPods" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
+  <div class="pipe-out" id="sOut" style="max-height:160px;overflow:auto"></div>
+</div>`;
+function initSts(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#sPods").style.gridTemplateColumns = "1fr";
+  const st = [{ s: "ready", ip: "10.244.1.4" }, null, null];
+  const pvc = [true, false, false];
+  let busy = false;
+  const log = m => { $("#sOut").innerHTML += m + "<br>"; $("#sOut").scrollTop = 1e6; };
+  const draw = () => {
+    $("#sPods").innerHTML = st.map((p, i) => `<div class="box" style="opacity:${p || pvc[i] ? 1 : .35}">
+      <b style="font:600 13px var(--mono)">postgres-${i}</b>
+      <div style="margin:8px 0">${p ? `<span class="pill ${p.s === "ready" ? "g" : p.s === "terminating" ? "r" : "a glow"}">${p.s}</span> <span class="faint" style="font:11px var(--mono)">${p.ip}</span>` : '<span class="faint">no Pod</span>'}</div>
+      <div class="faint" style="font:11px/1.6 var(--mono)">DNS: postgres-${i}.postgres<br>PVC: ${pvc[i] ? '<span style="color:#86efac">postgres-storage-postgres-' + i + ' (Bound)</span>' : "—"}</div></div>`).join("");
+  };
+  const seq = (ops, done) => { busy = true; let k = 0; const nx = () => { if (k >= ops.length) { busy = false; draw(); done && done(); return; } ops[k++](); draw(); setTimeout(nx, 900); }; nx(); };
+  $("#sUp").onclick = () => {
+    if (busy) return;
+    const par = $("#sPol").value === "Parallel", ops = [];
+    const start = i => () => { if (!pvc[i]) { pvc[i] = true; log(`PVC postgres-storage-postgres-${i} created from volumeClaimTemplate`); } st[i] = { s: "starting", ip: "" }; log(`creating postgres-${i}`); };
+    const ready = i => () => { st[i] = { s: "ready", ip: `10.244.${i + 1}.${7 + i}` }; log(`postgres-${i} Running & Ready`); };
+    const need = [1, 2].filter(i => !st[i]);
+    if (par) { ops.push(() => need.forEach(i => start(i)())); ops.push(() => need.forEach(i => ready(i)())); }
+    else need.forEach(i => { ops.push(start(i)); ops.push(ready(i)); });
+    if (!need.length) return log("already 3 replicas");
+    log(`<span class="faint">$ kubectl scale sts postgres --replicas=3 (${par ? "Parallel" : "OrderedReady: next starts only when previous is Ready"})</span>`);
+    seq(ops);
+  };
+  $("#sDown").onclick = () => {
+    if (busy) return;
+    const ops = [];
+    log('<span class="faint">$ kubectl scale sts postgres --replicas=1 (highest ordinal first)</span>');
+    [2, 1].filter(i => st[i]).forEach(i => { ops.push(() => { st[i].s = "terminating"; log(`terminating postgres-${i}`); }); ops.push(() => { st[i] = null; log(`postgres-${i} gone; <b>PVC kept</b> (data survives scale-down)`); }); });
+    seq(ops);
+  };
+  $("#sKill").onclick = () => {
+    if (busy || !st[1]) return log("postgres-1 is not running; scale to 3 first");
+    log('<span class="faint">$ kubectl delete pod postgres-1</span>');
+    seq([() => { st[1].s = "terminating"; }, () => { st[1] = { s: "starting", ip: "" }; log("recreated with the <b>same name</b> and re-attached to the <b>same PVC</b>"); }, () => { st[1] = { s: "ready", ip: "10.244.2.19" }; log("new IP, same identity: postgres-1.postgres DNS now points at 10.244.2.19"); }]);
+  };
+  draw(); log('<span class="faint"># StatefulSet postgres, replicas 1</span>');
+}
+
+K8S_RENDER({
+  id: "workloads-ds-sts", group: "workloads", minutes: 20,
+  title: '<span class="grad-text">DaemonSets</span> & <span class="grad-text">StatefulSets</span>',
+  lead: "Deployments treat Pods as interchangeable cattle. Two other controllers cover the cases where that's wrong: 'exactly one per node' and 'each replica has its own identity and data'.",
+  parts: [["DaemonSet", "One Pod per node"], ["StatefulSet", "Stable name, order, storage"], ["Headless Service", "Per-Pod DNS"], ["Choose", "Deployment vs DS vs STS"]],
+  sections: [
+    { id: "ds", title: "DaemonSet: one Pod on every node", toc: "DaemonSet",
+      lead: "Node agents: log collectors, monitoring exporters, CNI and CSI node plugins, kube-proxy. When a node joins, it gets the Pod; when it leaves, the Pod goes.",
+      blocks: [
+        { type: "custom", html: dsHtml, init: initDs },
+        { type: "code", title: "daemonset.yaml", code: `apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nginx-daemonset
+spec:
+  selector:
+    matchLabels:
+      name: nginx
+  template:
+    metadata:
+      labels:
+        name: nginx
+    spec:
+      # tolerations:                      # run on control-plane nodes too
+      # - key: node-role.kubernetes.io/control-plane
+      #   operator: Exists
+      #   effect: NoSchedule
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80` },
+        { type: "cards", cols: 3, items: [
+          ["🎯", "Subset of nodes", "Add <code>nodeSelector</code> or affinity to run only on, e.g., GPU nodes."],
+          ["🔄", "Updates", "<code>updateStrategy: RollingUpdate</code> (default, maxUnavailable per node) or <code>OnDelete</code>."],
+          ["🧭", "Find them", "<code>kubectl get ds -A</code>: kube-proxy, CNI agents and CSI node plugins are all DaemonSets."]
+        ] }
+      ] },
+    { id: "sts", title: "StatefulSet: stable identity and storage", toc: "StatefulSet",
+      lead: "Databases, queues and consensus systems need replicas that know who they are. StatefulSets give each Pod a sticky ordinal name, a sticky volume and predictable start/stop order.",
+      blocks: [
+        { type: "custom", html: stsHtml, init: initSts },
+        { type: "yaml", title: "statefulset.yaml", lines: [
+          ["apiVersion: apps/v1", ""],
+          ["kind: StatefulSet", ""],
+          ["metadata:", ""],
+          ["  name: postgres", "Pods are named <b>postgres-0, postgres-1, postgres-2</b>, never random suffixes."],
+          ["spec:", ""],
+          ["  serviceName: \"postgres\"", "<b>Governing headless Service.</b> Gives each Pod DNS: <code>postgres-0.postgres.&lt;ns&gt;.svc.cluster.local</code>."],
+          ["  replicas: 3", "Created in order 0 → 1 → 2 (each must be Ready first); removed 2 → 1 → 0."],
+          ["  selector:", ""],
+          ["    matchLabels: {app: postgres}", ""],
+          ["  template:", ""],
+          ["    spec:", ""],
+          ["      containers:", ""],
+          ["      - name: postgres", ""],
+          ["        image: postgres:13", ""],
+          ["        env:", ""],
+          ["        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}", "Subdirectory avoids the 'lost+found' problem on fresh ext4 volumes."],
+          ["        volumeMounts:", ""],
+          ["        - {name: postgres-storage, mountPath: /var/lib/postgresql/data}", ""],
+          ["  volumeClaimTemplates:", "<b>One PVC per replica</b>, named <code>postgres-storage-postgres-N</code>. Not deleted on scale-down or Pod deletion."],
+          ["  - metadata: {name: postgres-storage}", ""],
+          ["    spec:", ""],
+          ["      accessModes: [\"ReadWriteOnce\"]", "Each replica mounts its own disk read-write on one node."],
+          ["      resources: {requests: {storage: 1Gi}}", ""]
+        ] },
+        { type: "callout", kind: "warn", html: "A StatefulSet does <b>not</b> make your database replicated or highly available. postgres-1 and postgres-2 here are three independent, empty databases. Replication, failover and backups are the app's job, or an operator's (see CloudNativePG in the Volumes topic)." }
+      ] },
+    { id: "headless", title: "Headless Service: DNS per Pod", toc: "Headless Service",
+      blocks: [
+        { type: "code", title: "svc.yaml", code: `apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  clusterIP: None        # headless: no virtual IP, no kube-proxy load balancing
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    name: postgres` },
+        { type: "term", title: "check", lines: [
+          "$ kubectl create -f statefulset.yaml && kubectl apply -f svc.yaml",
+          "$ kubectl get pods -l app=postgres -w",
+          "postgres-0   1/1 Running",
+          "postgres-1   1/1 Running",
+          "postgres-2   1/1 Running",
+          "$ kubectl run -it --rm dns --image=busybox:1.36 --restart=Never -- nslookup postgres",
+          "Address: 10.244.1.4   Address: 10.244.2.8   Address: 10.244.1.9",
+          "$ kubectl run -it --rm dns --image=busybox:1.36 --restart=Never -- nslookup postgres-0.postgres",
+          "$ kubectl exec -it postgres-0 -- psql -U postgres",
+          "$ kubectl get pvc",
+          "postgres-storage-postgres-0   Bound   1Gi   RWO",
+          "✓ clients can target a specific replica, e.g. always write to postgres-0"
+        ] }
+      ] },
+    { id: "choose", title: "Which controller?", toc: "Choose",
+      blocks: [
+        { type: "table", head: ["", "Deployment", "DaemonSet", "StatefulSet"], rows: [
+          ["Pod names", "random suffix", "random suffix", "ordinal: name-0, name-1"],
+          ["How many", "replicas", "one per (matching) node", "replicas"],
+          ["Order", "parallel", "per node", "ordered (or Parallel policy)"],
+          ["Storage", "shared PVC or none", "usually hostPath", "PVC per replica via template"],
+          ["Network identity", "via Service only", "often hostNetwork", "stable DNS per Pod"],
+          ["Examples", "web apps, APIs (GameHub services)", "log agents, kube-proxy, CNI", "PostgreSQL, Kafka, etcd, Elasticsearch"]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🖥️", "DaemonSet per node", "Follows nodes in and out; needs tolerations for tainted nodes."],
+      ["🔢", "StatefulSet ordinals", "Stable names postgres-0..N and ordered rollout."],
+      ["💽", "volumeClaimTemplates", "One PVC per replica, kept on scale-down."],
+      ["📛", "Headless Service", "clusterIP: None → per-Pod DNS records."],
+      ["🧠", "Not automatic HA", "Replication/failover is the app's or an operator's job."],
+      ["🧭", "Pick by identity needs", "Interchangeable → Deployment."]
+    ],
+    cheat: `kubectl get ds -A
+kubectl rollout status ds/<name>
+kubectl get sts,pvc
+kubectl scale sts postgres --replicas=3
+kubectl rollout restart sts postgres
+kubectl delete sts postgres --cascade=orphan   # keep Pods
+kubectl delete pvc -l app=postgres              # data is NOT auto-deleted`,
+    quiz: [
+      ["A new node joins. What does a DaemonSet do?", ["Nothing until restarted", "Creates a Pod on the new node", "Moves a Pod there", "Scales replicas +1 everywhere"], 1, "One Pod per eligible node, automatically."],
+      ["StatefulSet scaled from 3 to 1. What happens to PVCs 1 and 2?", ["Deleted", "Kept for when replicas come back", "Moved to postgres-0", "Converted to emptyDir"], 1, "Data survives scale-down by default."],
+      ["What makes postgres-0.postgres resolvable?", ["A ClusterIP Service", "The governing headless Service (clusterIP: None)", "hostAliases", "NodePort"], 1, "Headless + serviceName gives per-Pod DNS."],
+      ["With OrderedReady, when is postgres-2 created?", ["Immediately", "After postgres-1 is Running and Ready", "After the PVC is deleted", "Random"], 1, "Ordered, one at a time."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

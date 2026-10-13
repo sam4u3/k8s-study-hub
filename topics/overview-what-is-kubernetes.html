@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes Overview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+K8S_RENDER({
+  id: "overview-intro", group: "overview", minutes: 25,
+  title: 'Kubernetes <span class="grad-text">overview</span>: from bare metal to containers',
+  lead: "Kubernetes solves problems that only appear once you run many containers. This topic builds the mental model first: how we got from one app per server to thousands of isolated processes per cluster.",
+  parts: [["Eras", "Bare metal, VMs, containers"], ["Container internals", "Namespaces, cgroups, layers"], ["Images", "Dockerfile, registries, tags"], ["Why orchestrate", "What breaks at scale"], ["History", "Borg to today"]],
+  sections: [
+    { id: "eras", title: "Three eras of running software", toc: "Three eras",
+      lead: "Each era fixed the biggest pain of the one before it, and introduced a new one.",
+      blocks: [
+        { type: "timeline", items: [
+          ["1990s–2000s", "One app per physical server", "Buy a server, install an OS, install the app. Apps on the same box fight over CPU, memory and library versions, so teams avoid sharing. Most servers idle at 10–15% utilisation."],
+          ["2001+", "Hypervisors and virtual machines", "VMware, Xen and KVM split one machine into many VMs, each with its own kernel. Better utilisation and isolation, but every VM boots a full OS: gigabytes of disk, minutes to start."],
+          ["2006–2008", "Linux gets cgroups and namespaces", "Google contributes cgroups (resource limits). Namespaces mature. LXC combines them: isolated processes that share the host kernel."],
+          ["2013", "Docker makes containers usable", "Docker adds a simple CLI, a layered image format and a registry. 'Works on my machine' becomes 'ships as the same image everywhere'."],
+          ["2014+", "Orchestration", "Teams now run hundreds of containers across many hosts. Scheduling, restarts, networking and rollouts need automation: Kubernetes, Swarm, Mesos. Kubernetes wins."]
+        ] },
+        { type: "h3", text: "Same app, three stacks" },
+        { type: "tabs", tabs: [
+          { label: "🖥️ Bare metal", blocks: [{ type: "layers", items: [["App A + App B", "share libs, ports and failure domain", "#f87171"], ["Libraries / runtimes", "one version for everything", "#fbbf24"], ["Operating system", "one kernel", "#8b5cf6"], ["Physical server", "CPU · RAM · disk · NIC", "#5b8cff"]] }] },
+          { label: "🧱 Virtual machines", blocks: [{ type: "layers", items: [["App A  |  App B", "isolated per VM", "#34d399"], ["Libs A  |  Libs B", "independent versions", "#fbbf24"], ["Guest OS  |  Guest OS", "a full kernel per VM (GBs)", "#f87171"], ["Hypervisor", "KVM, ESXi, Hyper-V", "#8b5cf6"], ["Host OS + hardware", "", "#5b8cff"]] }] },
+          { label: "📦 Containers", blocks: [{ type: "layers", items: [["App A  |  App B  |  App C", "isolated processes", "#34d399"], ["Image layers per app", "own libs, MBs not GBs", "#fbbf24"], ["Container runtime", "containerd / CRI-O + runc", "#22d3ee"], ["Host OS kernel (shared)", "namespaces + cgroups", "#8b5cf6"], ["Hardware or VM", "", "#5b8cff"]] }] }
+        ] },
+        { type: "compare", cols: [
+          { title: "Bare metal", chip: "1 app / server", chipClass: "red", color: "var(--red)", items: ["Best raw performance", "Poor utilisation", "Slow to provision (days/weeks)", "Dependency conflicts between apps"] },
+          { title: "Virtual machines", chip: "strong isolation", chipClass: "amber", color: "var(--amber)", items: ["Separate kernel per VM", "Boot in minutes, GBs per image", "Great for multi-tenant hardware", "OS patching per VM"] },
+          { title: "Containers", chip: "lightweight", chipClass: "green", color: "var(--green)", items: ["Share host kernel", "Start in milliseconds, MBs per image", "Immutable, portable images", "Weaker isolation than a VM by default"] }
+        ] },
+        { type: "callout", kind: "info", html: "In real clusters you usually get <b>both</b>: Kubernetes nodes are often VMs, and containers run inside them. Containers did not replace VMs; they replaced the habit of one VM per app." }
+      ] },
+    { id: "internals", title: "What a container really is", toc: "Container internals",
+      lead: "There is no 'container' object in the Linux kernel. A container is an ordinary process wrapped in namespaces (what it can see) and cgroups (what it can use), started on a layered filesystem.",
+      blocks: [
+        { type: "cards", cols: 4, items: [
+          ["🆔", "PID namespace", "Process sees itself as PID 1 and cannot see host processes."],
+          ["🌐", "NET namespace", "Own interfaces, IPs, routes and ports. Kubernetes gives one per Pod."],
+          ["📂", "MNT namespace", "Own mount table, so its root filesystem is the image."],
+          ["🏷️", "UTS namespace", "Own hostname. That is why <code>hostname</code> in a Pod prints the Pod name."],
+          ["✉️", "IPC namespace", "Own shared memory and semaphores."],
+          ["👤", "USER namespace", "Maps root inside to an unprivileged user outside (user namespaces in K8s are newer)."],
+          ["📊", "cgroups", "Hard limits and accounting for CPU, memory, PIDs, I/O. Kubernetes requests/limits become cgroup settings."],
+          ["🥞", "Union filesystem", "OverlayFS stacks read-only image layers plus one writable layer per container."]
+        ] },
+        { type: "h3", text: "Animated: what happens on docker run nginx" },
+        { type: "flow", nodes: [
+          ["⌨️", "CLI", "docker run nginx", "The CLI sends the request to the daemon (dockerd), which hands container work to <b>containerd</b>."],
+          ["📥", "Pull", "Pull image layers", "containerd resolves <code>nginx:latest</code> to a digest and downloads only the layers it does not already have."],
+          ["🥞", "Overlay", "Prepare the filesystem", "Layers are unpacked and stacked with OverlayFS. A thin writable layer is added on top for this container."],
+          ["🧱", "Namespaces", "Create namespaces", "runc creates new PID, NET, MNT, UTS and IPC namespaces for the process."],
+          ["📊", "cgroups", "Apply limits", "runc puts the process in a cgroup with any CPU/memory limits you asked for."],
+          ["🚀", "Process", "Exec the entrypoint", "runc starts <code>nginx -g 'daemon off;'</code> as PID 1 inside the namespaces, then exits. containerd-shim keeps watching it."]
+        ] },
+        { type: "term", title: "see it yourself on a Linux host", lines: [
+          "$ docker run -d --name web --memory 128m nginx",
+          "$ docker inspect -f '{{.State.Pid}}' web",
+          "41237",
+          "$ sudo lsns -p 41237",
+          "        NS TYPE   NPROCS   PID USER COMMAND",
+          "4026532601 mnt         3 41237 root nginx: master process",
+          "4026532602 uts         3 41237 root nginx: master process",
+          "4026532603 ipc         3 41237 root nginx: master process",
+          "4026532604 pid         3 41237 root nginx: master process",
+          "4026532606 net         3 41237 root nginx: master process",
+          "$ cat /sys/fs/cgroup/system.slice/docker-*.scope/memory.max",
+          "134217728",
+          "$ sudo unshare --pid --fork --mount-proc bash -c 'ps aux'   # a 'container' with no Docker at all",
+          "✓ a container is just a namespaced, cgroup-limited Linux process"
+        ] }
+      ] },
+    { id: "images", title: "Images, layers and registries", toc: "Images & layers",
+      lead: "An image is a stack of read-only filesystem layers plus a config (entrypoint, env, ports). Every Dockerfile instruction that changes files adds a layer.",
+      blocks: [
+        { type: "yaml", title: "Dockerfile (Python web service)", intro: "A typical Python API service. Click a line.", lines: [
+          ["FROM python:3.11-slim", "<b>Base image.</b> Brings the OS userland and Python as shared, cached layers. Slim variants keep images small."],
+          ["WORKDIR /app", "Sets the working directory for the following instructions and for the running container."],
+          ["COPY requirements.txt .", "<b>Copy dependencies first.</b> This layer only changes when requirements change, so the next layer stays cached."],
+          ["RUN pip install --no-cache-dir -r requirements.txt", "<b>Install dependencies.</b> Creates a layer. Ordering it before COPY of source code means editing code does not reinstall packages."],
+          ["COPY . .", "Copies the application code. Changes often, so it is near the end."],
+          ["EXPOSE 8080", "Documentation only: records that the app listens on 8080. It does not publish the port."],
+          ["CMD [\"python\", \"app.py\"]", "<b>Default command.</b> In Kubernetes, <code>args</code> overrides CMD and <code>command</code> overrides ENTRYPOINT."]
+        ] },
+        { type: "steps", steps: [
+          { title: "Build", where: "Developer", why: "Build for the CPU architecture of your nodes. On an Apple Silicon Mac, cloud nodes are usually amd64, so build for linux/amd64 or the Pod fails with <code>exec format error</code>.", code: "docker buildx build --platform linux/amd64 -t ttl.sh/auth-service:1h ./auth-service" },
+          { title: "Push", where: "Developer", why: "<b>ttl.sh</b> is an anonymous, ephemeral registry: the tag (<code>:1h</code>) is how long the image lives. Perfect for demos, never for production.", code: "docker push ttl.sh/auth-service:1h\n\n# Real registries: Docker Hub, GHCR, ECR, GCR/Artifact Registry, Harbor\ndocker tag auth-service ghcr.io/<you>/auth-service:v1\ndocker push ghcr.io/<you>/auth-service:v1" },
+          { title: "Pin by digest", where: "Production", whereClass: "green", why: "Tags are mutable: <code>:latest</code> today is not <code>:latest</code> tomorrow. A digest is the content hash and never changes.", code: "docker buildx imagetools inspect nginx:1.27 | grep Digest\n# image: nginx@sha256:3f0c...   # immutable reference" },
+          { title: "Run anywhere", where: "Any node", why: "The same image runs on a laptop, CI and every Kubernetes node. Only configuration (env, ConfigMaps, Secrets) changes between environments.", code: "kubectl run auth --image=ttl.sh/auth-service:1h --port=8080" }
+        ] }
+      ] },
+    { id: "micro", title: "Monoliths and microservices", toc: "Microservices",
+      lead: "Containers made it cheap to split one big app into small services that deploy and scale independently. That flexibility is also what creates the need for an orchestrator.",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Monolith", chip: "one deployable", chipClass: "violet", color: "var(--violet)", items: ["Single codebase and process", "Simple to run locally and to debug", "Scale the whole app even if one part is hot", "One bug or deploy can take everything down"] },
+          { title: "Microservices", chip: "many deployables", chipClass: "blue", color: "var(--k8s-2)", items: ["Each service owns one job (auth, games, UI)", "Deploy, scale and pick tech per service", "Network calls, service discovery and partial failure", "Needs automation: exactly what Kubernetes provides"] }
+        ] },
+        { type: "callout", kind: "warn", html: "Microservices are not free. A small team with one product is often faster with a well-structured monolith. Choose microservices for independent scaling and team ownership, not for fashion." }
+      ] },
+    { id: "why", title: "Why you need an orchestrator", toc: "Why orchestrate",
+      lead: "Run 3 containers on one laptop and docker is enough. Run 300 across 20 machines and these questions appear. Kubernetes answers each one with an API object.",
+      blocks: [
+        { type: "table", head: ["Problem at scale", "Kubernetes answer", "Topic"], rows: [
+          ["Which machine should this container run on?", "<code>kube-scheduler</code> with requests, affinity, taints", "Scheduler"],
+          ["A container crashed at 3 a.m.", "Controllers restart Pods and replace them to match <code>replicas</code>", "Deployments"],
+          ["How do services find each other when IPs change?", "<code>Service</code> virtual IPs + CoreDNS names", "Services, CoreDNS"],
+          ["Ship a new version without downtime", "Rolling updates, rollbacks, probes", "Deployments, Pods"],
+          ["Configuration and passwords per environment", "<code>ConfigMap</code> and <code>Secret</code>", "Config"],
+          ["Data must survive a container restart", "<code>PersistentVolumeClaim</code> + CSI", "Volumes"],
+          ["Expose the app to the internet with TLS", "Ingress / Gateway API + cert-manager", "Gateway API"],
+          ["Who may change what?", "RBAC, ServiceAccounts, admission", "RBAC"]
+        ] },
+        { type: "flow", interval: 2600, nodes: [
+          ["📝", "Desired", "You declare desired state", "You write YAML: 'I want 3 replicas of auth-service v2'. You never say <i>how</i>."],
+          ["💾", "Stored", "API server stores it", "The object is validated and saved in etcd. That is the source of truth."],
+          ["👀", "Observe", "Controllers watch", "A controller notices that the actual state (1 running Pod) differs from desired (3)."],
+          ["🔧", "Act", "Controllers act", "It creates 2 more Pods. The scheduler places them; kubelets start them."],
+          ["🔁", "Repeat", "Reconcile forever", "If a node dies, actual state drifts again and the loop repairs it. This loop is the core idea of Kubernetes."]
+        ] }
+      ] }
+,
+    { id: "history", title: "History of Kubernetes", toc: "History",
+      lead: "Kubernetes is the open-source descendant of Google's internal cluster managers. Each milestone explains a design choice you still see today.",
+      blocks: [
+        { type: "custom", html: `<div class="cols3">
+          <div class="fact glass"><div class="big grad-text">κυβερνήτης</div><p>Greek for <b>helmsman / pilot</b>. That is why the logo is a ship's wheel.</p></div>
+          <div class="fact glass"><div class="big grad-text">K8s</div><p>Numeronym: K + <b>8</b> letters ("ubernete") + s.</p></div>
+          <div class="fact glass"><div class="big grad-text">7 spokes</div><p>Internal codename <b>Project Seven</b> (after Star Trek's Seven of Nine, a "friendlier Borg").</p></div></div>` },
+        { type: "timeline", items: [
+    ["2003–04", "Borg is born", "Google builds Borg to run search, Gmail and batch jobs on shared clusters. Ideas that carry over: Pods (allocs), labels, declarative jobs, one IP per task."],
+    ["2013", "Omega and Docker", "Google's Omega research explores a shared-state scheduler. In March, Docker makes Linux containers easy to package and ship."],
+    ["Jun 2014", "Kubernetes announced", "Joe Beda, Brendan Burns and Craig McLuckie (with Brian Grant, Tim Hockin and others) open-source Kubernetes, written in Go. First public commit on 6 June 2014."],
+    ["Jul 2015", "v1.0 and the CNCF", "Kubernetes 1.0 ships. Google donates it to the new Cloud Native Computing Foundation under the Linux Foundation, giving it vendor-neutral governance."],
+    ["2016", "Tooling explosion", "kubeadm (1.4), Helm, minikube and kops appear. StatefulSets arrive as PetSets. Pokémon GO runs on GKE and proves the scale story."],
+    ["2017", "The orchestrator war ends", "RBAC goes GA in 1.8. CRDs replace ThirdPartyResources. Docker, AWS (EKS) and Azure (AKS) all adopt Kubernetes."],
+    ["Mar 2018", "First CNCF graduate", "Kubernetes becomes the first CNCF project to graduate. kubeadm reaches GA in 1.13 (Dec 2018) and CoreDNS becomes the default DNS."],
+    ["2019–20", "API clean-up", "1.16 removes extensions/v1beta1 workloads and CRDs go GA. 1.20 announces the dockershim deprecation."],
+    ["2021–22", "Runtime and security reset", "Cadence drops to three releases a year (1.22). 1.24 removes dockershim (use containerd/CRI-O). 1.25 removes PodSecurityPolicy; Pod Security Admission goes GA."],
+    ["2023", "New registry, new primitives", "registry.k8s.io replaces k8s.gcr.io. Native sidecar containers enter alpha (1.28). kubectl auth whoami becomes available."],
+    ["2024", "Ten years", "Kubernetes turns 10. ValidatingAdmissionPolicy (CEL) is GA in 1.30. 1.31 completes the removal of in-tree cloud providers."],
+    ["2025", "Workloads get smarter", "Sidecar containers are GA (1.33). Dynamic Resource Allocation for GPUs and devices is GA (1.34). In-place Pod resize is GA (1.35)."],
+    ["2026", "Steady cadence", "1.36 ships in April and 1.37 in August 2026, keeping the three-releases-a-year rhythm."],
+    ["Today", "Platform of platforms", "Three minor releases per year, ~14 months of patch support each. The API you learn below is the same contract every distribution (EKS, GKE, AKS, OpenShift, k3s) implements."]
+  ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🖥️", "Each era fixed a cost", "Bare metal wasted hardware, VMs wasted OS overhead, containers share the kernel and start in milliseconds."],
+      ["🧱", "Container = process + isolation", "Namespaces limit what a process sees; cgroups limit what it uses. No magic VM."],
+      ["🥞", "Images are layered", "Order Dockerfile steps from least to most frequently changed to reuse cached layers."],
+      ["🏷️", "Tags move, digests don't", "Pin production images by digest or immutable version tags. ttl.sh is for demos only."],
+      ["🧩", "Microservices need automation", "Many small services create scheduling, discovery and rollout problems at scale."],
+      ["🔁", "Kubernetes reconciles", "Declare desired state; controllers loop until reality matches."],
+      ["🧬", "Born from Borg", "Open-sourced by Google in 2014, donated to the CNCF in 2015, three releases a year since 2021."]
+    ],
+    cheat: `# inspect a running container like the kernel sees it
+docker run -d --name web --memory 128m nginx
+PID=$(docker inspect -f '{{.State.Pid}}' web)
+sudo lsns -p $PID                 # namespaces
+cat /proc/$PID/cgroup             # cgroup path
+
+# build and ship for amd64 nodes
+docker buildx build --platform linux/amd64 -t ttl.sh/app:1h --push .
+docker image history ttl.sh/app:1h   # see layers`,
+    quiz: [
+      ["What makes a container start much faster than a VM?", ["It uses a smaller hypervisor", "It shares the host kernel instead of booting its own OS", "It runs in the browser", "It skips the filesystem"], 1, "No guest kernel to boot: starting a container is starting a process."],
+      ["Which Linux feature enforces a container's memory limit?", ["PID namespace", "cgroups", "OverlayFS", "iptables"], 1, "cgroups apply and account CPU, memory, PIDs and I/O limits."],
+      ["Why copy requirements.txt before the source code in a Dockerfile?", ["Docker requires it", "To keep the dependency layer cached when only code changes", "To make the image run as non-root", "To expose the port"], 1, "Layers are cached until their inputs change; dependencies change less often than code."],
+      ["An image built on an Apple Silicon Mac fails on cloud nodes with 'exec format error'. Fix?", ["Use a bigger node", "Build with --platform linux/amd64", "Use :latest", "Add EXPOSE"], 1, "The binary architecture must match the node CPU."],
+      ["Which project did Kubernetes descend from?", ["Docker Swarm", "Google's Borg (and Omega)", "Apache Mesos", "OpenStack"], 1, "Many Kubernetes ideas (Pods, labels, controllers) come from Borg."],
+      ["What is the core operating idea of Kubernetes?", ["Imperative scripts run on a schedule", "Controllers continuously reconcile actual state to declared desired state", "Every Pod gets a VM", "Developers SSH into nodes"], 1, "Declarative desired state plus reconcile loops."]
+    ]
+  }
+});
+</script>
+</body>
+</html>
