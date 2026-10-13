@@ -1009,6 +1009,38 @@ window.K8S_TOPICS = [
     ]
   },
   {
+    "id": "sched-gang",
+    "group": "scheduling",
+    "status": "ready",
+    "file": "topics/scheduling-gang-workload-api.html",
+    "title": "Gang Scheduling: Workload API & PodGroups",
+    "summary": "All-or-nothing scheduling for AI and batch: Workload and PodGroup objects, the PodGroup scheduling cycle, workload-aware preemption, topology constraints and CompositePodGroups.",
+    "tags": [
+      "gang",
+      "podgroup",
+      "workload-api"
+    ],
+    "minutes": 25,
+    "docs": [
+      [
+        "Gang scheduling",
+        "concepts/scheduling-eviction/gang-scheduling/"
+      ],
+      [
+        "Workload API",
+        "concepts/workloads/workload-api/"
+      ],
+      [
+        "PodGroup API",
+        "concepts/workloads/podgroup-api/"
+      ],
+      [
+        "Workload-aware preemption",
+        "concepts/scheduling-eviction/workload-aware-preemption/"
+      ]
+    ]
+  },
+  {
     "id": "admin-lifecycle",
     "group": "admin",
     "status": "ready",
@@ -1092,6 +1124,38 @@ window.K8S_TOPICS = [
     ]
   },
   {
+    "id": "win-nodes",
+    "group": "windows",
+    "status": "ready",
+    "file": "topics/windows-nodes-containers.html",
+    "title": "Windows Nodes & Containers",
+    "summary": "Hybrid Linux/Windows clusters: OS-aware placement with selectors, taints and RuntimeClass, API differences, HNS networking, storage limits, HostProcess and joining a Windows node.",
+    "tags": [
+      "windows",
+      "hostprocess",
+      "runtimeclass"
+    ],
+    "minutes": 25,
+    "docs": [
+      [
+        "Windows containers in Kubernetes",
+        "concepts/windows/intro/"
+      ],
+      [
+        "Guide for running Windows containers",
+        "concepts/windows/user-guide/"
+      ],
+      [
+        "Networking on Windows",
+        "concepts/services-networking/windows-networking/"
+      ],
+      [
+        "Adding Windows worker nodes",
+        "tasks/administer-cluster/kubeadm/adding-windows-nodes/"
+      ]
+    ]
+  },
+  {
     "id": "ext-extending",
     "group": "extending",
     "status": "ready",
@@ -1162,33 +1226,6 @@ window.K8S_TOPICS = [
         "Stateless application tutorials",
         "tutorials/stateless-application/"
       ]
-    ]
-  },
-  {
-    "id": "win-nodes",
-    "group": "windows",
-    "status": "planned",
-    "title": "Windows Nodes & Containers",
-    "summary": "Run Windows containers alongside Linux.",
-    "tags": [
-      "windows"
-    ],
-    "docs": [
-      [
-        "Windows in Kubernetes",
-        "concepts/windows/"
-      ]
-    ]
-  },
-  {
-    "id": "sched-gang",
-    "group": "scheduling",
-    "status": "planned",
-    "title": "Workload API & Gang Scheduling",
-    "summary": "PodGroups and all-or-nothing scheduling for AI/batch.",
-    "tags": [
-      "gang",
-      "podgroup"
     ]
   }
 ];

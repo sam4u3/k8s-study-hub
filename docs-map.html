@@ -111,7 +111,7 @@ const MAP = [
     ["ReplicationController", "workloads/controllers/replicationcontroller/", ["workloads-deployments"], "part"],
     ["Managing Workloads", "workloads/management/", ["workloads-deployments", "overview-metadata"], "full"],
     ["Autoscaling Workloads, HPA, VPA", "workloads/autoscaling/", ["workloads-autoscaling"], "full"],
-    ["Workload API, PodGroup, CompositePodGroup (gang scheduling)", "workloads/", [], "gap"]
+    ["Workload API, PodGroup, CompositePodGroup (gang scheduling)", "workloads/workload-api/", ["sched-gang"], "full"]
   ]],
   ["Services, Load Balancing, and Networking", [
     ["Service", "services-networking/service/", ["net-services", "net-kube-proxy"], "full"],
@@ -123,7 +123,7 @@ const MAP = [
     ["DNS for Services and Pods", "services-networking/dns-pod-service/", ["net-dns"], "full"],
     ["IPv4/IPv6 dual-stack", "services-networking/dual-stack/", ["net-advanced"], "full"],
     ["Topology Aware Routing", "services-networking/topology-aware-routing/", ["net-advanced"], "full"],
-    ["Networking on Windows", "services-networking/windows-networking/", [], "gap"],
+    ["Networking on Windows", "services-networking/windows-networking/", ["win-nodes"], "full"],
     ["Service ClusterIP allocation", "services-networking/cluster-ip-allocation/", ["net-advanced"], "full"],
     ["Service Internal Traffic Policy", "services-networking/service-traffic-policy/", ["net-advanced"], "full"]
   ]],
@@ -142,7 +142,7 @@ const MAP = [
     ["Node-specific Volume Limits", "storage/storage-limits/", ["storage-advanced"], "part"],
     ["Local ephemeral storage", "storage/ephemeral-storage/", ["storage-advanced"], "full"],
     ["Volume Health Monitoring", "storage/volume-health-monitoring/", ["storage-advanced"], "part"],
-    ["Windows Storage", "storage/windows-storage/", [], "gap"]
+    ["Windows Storage", "storage/windows-storage/", ["win-nodes"], "full"]
   ]],
   ["Configuration", [
     ["ConfigMaps", "configuration/configmap/", ["config-cm-secrets"], "full"],
@@ -150,7 +150,7 @@ const MAP = [
     ["Liveness, Readiness, and Startup Probes", "workloads/pods/pod-lifecycle/#container-probes", ["workloads-pods"], "full"],
     ["Resource Management for Pods and Containers", "configuration/manage-resources-containers/", ["workloads-pods", "sched-scheduler", "storage-advanced"], "full"],
     ["Organizing Cluster Access Using kubeconfig Files", "configuration/organize-cluster-access-kubeconfig/", ["overview-objects"], "full"],
-    ["Resource Management for Windows nodes", "configuration/windows-resource-management/", [], "gap"]
+    ["Resource Management for Windows nodes", "configuration/windows-resource-management/", ["win-nodes"], "full"]
   ]],
   ["Security", [
     ["Cloud Native Security", "security/cloud-native-security/", ["security-api-access"], "part"],
@@ -159,7 +159,7 @@ const MAP = [
     ["Service Accounts", "security/service-accounts/", ["security-rbac"], "full"],
     ["Pod Security Policies (removed)", "security/pod-security-policy/", ["security-pod-security"], "full"],
     ["Security For Linux Nodes", "security/linux-security/", ["security-pod-security"], "part"],
-    ["Security For Windows Nodes", "security/windows-security/", [], "gap"],
+    ["Security For Windows Nodes", "security/windows-security/", ["win-nodes"], "full"],
     ["Controlling Access to the Kubernetes API", "security/controlling-access/", ["security-api-access", "security-rbac", "security-csr"], "full"],
     ["Role Based Access Control Good Practices", "security/rbac-good-practices/", ["security-rbac", "security-api-access"], "full"],
     ["Good practices for Kubernetes Secrets", "security/secrets-good-practices/", ["security-api-access", "config-cm-secrets"], "full"],
@@ -187,7 +187,7 @@ const MAP = [
     ["Pod Priority and Preemption", "scheduling-eviction/pod-priority-preemption/", ["sched-scheduler"], "full"],
     ["Node-pressure Eviction", "scheduling-eviction/node-pressure-eviction/", ["sched-disruptions"], "full"],
     ["API-initiated Eviction", "scheduling-eviction/api-eviction/", ["sched-disruptions"], "full"],
-    ["Gang Scheduling, PodGroup Scheduling, Workload-Aware Preemption", "scheduling-eviction/", [], "gap"],
+    ["Gang Scheduling, PodGroup Scheduling, Workload-Aware Preemption", "scheduling-eviction/gang-scheduling/", ["sched-gang"], "full"],
     ["Node Declared Features", "scheduling-eviction/", [], "gap"]
   ]],
   ["Resource Management (devices)", [
@@ -212,8 +212,8 @@ const MAP = [
     ["Coordinated Leader Election", "cluster-administration/coordinated-leader-election/", ["arch-internals"], "full"]
   ]],
   ["Windows in Kubernetes", [
-    ["Windows containers in Kubernetes", "windows/intro/", [], "gap"],
-    ["Guide for Running Windows Containers", "windows/user-guide/", [], "gap"]
+    ["Windows containers in Kubernetes", "windows/intro/", ["win-nodes"], "full"],
+    ["Guide for Running Windows Containers", "windows/user-guide/", ["win-nodes"], "full"]
   ]],
   ["Extending Kubernetes", [
     ["Network Plugins", "extend-kubernetes/compute-storage-net/network-plugins/", ["net-cni"], "full"],
