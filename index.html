@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes Study Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/glass.css">
+<style>
+  header.hero { padding: 64px 0 28px; }
+  .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+  .wheel { width: 52px; height: 52px; animation: spin 18s linear infinite; filter: drop-shadow(0 0 14px rgba(91,140,255,.6)); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { font-size: clamp(32px, 5vw, 56px); line-height: 1.05; margin: 0 0 12px; letter-spacing: -0.02em; font-weight: 800; }
+  .lead { font-size: 17px; max-width: 720px; color: var(--muted); margin: 0; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 30px 0 18px; }
+  .stat { padding: 18px; }
+  .stat .n { font-size: 30px; font-weight: 800; }
+  .stat .l { color: var(--muted); font-size: 13px; }
+  .ring { height: 6px; background: rgba(255,255,255,0.08); border-radius: 6px; overflow: hidden; margin-top: 10px; }
+  .ring > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--k8s), var(--cyan)); transition: width 1.2s ease; }
+
+  .toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 14px; margin-bottom: 26px; position: sticky; top: 10px; z-index: 20; }
+  .toolbar .input { max-width: 320px; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+  .filters .chip { cursor: pointer; transition: all .2s; }
+  .filters .chip.on { color: var(--text); background: rgba(91,140,255,.25); border-color: rgba(91,140,255,.6); }
+  .toggle { margin-left: auto; display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); cursor: pointer; }
+
+  section.group { margin-bottom: 40px; }
+  .group-head { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+  .group-icon { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font-size: 22px; border: 1px solid var(--border); }
+  .group-head h2 { margin: 0; font-size: 22px; }
+  .group-head p { margin: 0; color: var(--muted); font-size: 14px; }
+  .group-meta { margin-left: auto; font-size: 13px; color: var(--faint); white-space: nowrap; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .card { padding: 20px; display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden; color: inherit; }
+  .card:hover { text-decoration: none; }
+  .card::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+    background: linear-gradient(135deg, var(--accent, var(--k8s)), transparent 60%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude; opacity: .6; pointer-events: none;
+  }
+  .card h3 { margin: 0; font-size: 17px; line-height: 1.3; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
+  .card .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .card.planned { opacity: .55; cursor: default; }
+  .card.planned:hover { transform: none; }
+  .card .done-badge { position: absolute; top: 14px; right: 14px; }
+  .shine { position: absolute; top: 0; left: -60%; width: 40%; height: 100%; transform: skewX(-20deg);
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent); transition: left .7s ease; pointer-events: none; }
+  .card:not(.planned):hover .shine { left: 130%; }
+
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  footer { padding: 40px 0 60px; color: var(--faint); font-size: 13px; text-align: center; }
+
+  @media (max-width: 760px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .group-meta { display: none; }
+    .toggle { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="blobs"><span></span><span></span><span></span></div>
+
+<div class="container">
+  <header class="hero reveal">
+    <div class="brand">
+      <svg class="wheel" viewBox="0 0 100 100" aria-hidden="true">
+        <polygon points="50,4 88,22 97,63 71,95 29,95 3,63 12,22" fill="#326ce5"/>
+        <circle cx="50" cy="52" r="20" fill="none" stroke="#fff" stroke-width="5"/>
+        <g stroke="#fff" stroke-width="5" stroke-linecap="round">
+          <line x1="50" y1="52" x2="50" y2="20"/><line x1="50" y1="52" x2="75" y2="38"/>
+          <line x1="50" y1="52" x2="80" y2="62"/><line x1="50" y1="52" x2="62" y2="82"/>
+          <line x1="50" y1="52" x2="38" y2="82"/><line x1="50" y1="52" x2="20" y2="62"/>
+          <line x1="50" y1="52" x2="25" y2="38"/>
+        </g>
+        <circle cx="50" cy="52" r="6" fill="#fff"/>
+      </svg>
+      <span class="chip blue">Personal study hub</span>
+    </div>
+    <h1>Kubernetes <span class="grad-text">Study Hub</span></h1>
+    <p class="lead">Every topic in one place, grouped from foundations to advanced. Open a ready topic, work through the animated walkthroughs, then mark it complete.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat glass reveal"><div class="n" id="s-ready">0</div><div class="l">Topics ready</div></div>
+    <div class="stat glass reveal"><div class="n" id="s-planned">0</div><div class="l">On roadmap</div></div>
+    <div class="stat glass reveal"><div class="n" id="s-done">0</div><div class="l">Completed by you</div></div>
+    <div class="stat glass reveal"><div class="n" id="s-pct">0%</div><div class="l">Progress (ready topics)</div><div class="ring"><i id="s-bar"></i></div></div>
+  </div>
+
+  <div class="toolbar glass">
+    <input id="q" class="input" type="search" placeholder="Search topics, tags…  ( / )" aria-label="Search topics">
+    <div class="filters" id="filters"></div>
+    <label class="toggle"><input type="checkbox" id="showPlanned" checked> Show roadmap</label>
+  </div>
+
+  <main id="groups"></main>
+  <footer>Add a topic: put its HTML in <code>topics/</code> and register it in <code>assets/topics.js</code>.</footer>
+</div>
+
+<script src="assets/glass.js"></script>
+<script src="assets/topics.js"></script>
+<script>
+(function () {
+  const groups = window.K8S_GROUPS, topics = window.K8S_TOPICS;
+  const state = { q: "", group: "all", planned: true };
+  const $ = s => document.querySelector(s);
+
+  function stats() {
+    const ready = topics.filter(t => t.status === "ready");
+    const done = ready.filter(t => K8S.isDone(t.id)).length;
+    const pct = ready.length ? Math.round(done / ready.length * 100) : 0;
+    countUp($("#s-ready"), ready.length);
+    countUp($("#s-planned"), topics.length - ready.length);
+    countUp($("#s-done"), done);
+    countUp($("#s-pct"), pct, "%");
+    setTimeout(() => $("#s-bar").style.width = pct + "%", 200);
+  }
+  function countUp(el, to, suffix = "") {
+    let n = 0; const step = Math.max(1, Math.ceil(to / 25));
+    const t = setInterval(() => { n = Math.min(to, n + step); el.textContent = n + suffix; if (n >= to) clearInterval(t); }, 35);
+    if (to === 0) el.textContent = "0" + suffix;
+  }
+
+  function filters() {
+    const f = $("#filters");
+    const all = [{ id: "all", title: "All" }, ...groups];
+    f.innerHTML = all.map(g => `<span class="chip ${g.id === state.group ? "on" : ""}" data-g="${g.id}">${g.icon ? g.icon + " " : ""}${g.title}</span>`).join("");
+    f.querySelectorAll(".chip").forEach(c => c.onclick = () => { state.group = c.dataset.g; filters(); render(); });
+  }
+
+  function matches(t) {
+    if (!state.planned && t.status !== "ready") return false;
+    if (state.group !== "all" && t.group !== state.group) return false;
+    if (!state.q) return true;
+    const hay = (t.title + " " + t.summary + " " + (t.tags || []).join(" ")).toLowerCase();
+    return state.q.split(/\s+/).every(w => hay.includes(w));
+  }
+
+  function card(t, g) {
+    const done = K8S.isDone(t.id);
+    const tags = (t.tags || []).slice(0, 4).map(x => `<span class="chip">#${x}</span>`).join("");
+    const status = t.status === "ready"
+      ? `<span class="chip green">Ready</span>${t.minutes ? `<span class="chip">${t.minutes} min</span>` : ""}`
+      : `<span class="chip amber">Planned</span>`;
+    const inner = `<span class="shine"></span>
+      ${done ? `<span class="chip green done-badge">✓ Done</span>` : ""}
+      <div class="row">${status}</div>
+      <h3>${t.title}</h3><p>${t.summary}</p><div class="row">${tags}</div>`;
+    return t.status === "ready"
+      ? `<a class="card glass glass-hover reveal" style="--accent:${g.color}" href="${t.file}">${inner}</a>`
+      : `<div class="card glass planned reveal" style="--accent:${g.color}">${inner}</div>`;
+  }
+
+  function render() {
+    const host = $("#groups");
+    let html = "";
+    groups.forEach(g => {
+      const list = topics.filter(t => t.group === g.id && matches(t));
+      if (!list.length) return;
+      const all = topics.filter(t => t.group === g.id);
+      const ready = all.filter(t => t.status === "ready").length;
+      const done = all.filter(t => t.status === "ready" && K8S.isDone(t.id)).length;
+      list.sort((a, b) => (a.status === "ready" ? 0 : 1) - (b.status === "ready" ? 0 : 1));
+      html += `<section class="group">
+        <div class="group-head reveal">
+          <div class="group-icon" style="background:${g.color}22">${g.icon}</div>
+          <div><h2>${g.title}</h2><p>${g.desc}</p></div>
+          <div class="group-meta">${ready} ready · ${done} done · ${all.length - ready} planned</div>
+        </div>
+        <div class="grid">${list.map(t => card(t, g)).join("")}</div></section>`;
+    });
+    host.innerHTML = html || `<div class="empty glass">No topics match. Clear the search or pick another group.</div>`;
+    K8S.initReveal(host);
+  }
+
+  $("#q").addEventListener("input", e => { state.q = e.target.value.trim().toLowerCase(); render(); });
+  $("#showPlanned").addEventListener("change", e => { state.planned = e.target.checked; render(); });
+  addEventListener("keydown", e => { if (e.key === "/" && document.activeElement !== $("#q")) { e.preventDefault(); $("#q").focus(); } });
+  // pageshow also fires on back-navigation from a topic, so completion badges stay current.
+  addEventListener("pageshow", () => { stats(); render(); });
+
+  filters(); K8S.initReveal();
+})();
+</script>
+</body>
+</html>
