@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autoscaling</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// HPA algorithm calculator.
+const hpaHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>current replicas: <b id="hrV">4</b><input class="input" type="range" min="1" max="20" value="4" id="hr"></label>
+    <label>avg CPU utilization (% of request): <b id="huV">90</b><input class="input" type="range" min="5" max="300" step="5" value="90" id="hu"></label>
+    <label>target: <b id="htV">60</b>%<input class="input" type="range" min="10" max="100" step="5" value="60" id="ht"></label>
+  </div>
+  <div class="sim-row">
+    <label>minReplicas: <b id="hminV">2</b><input class="input" type="range" min="1" max="10" value="2" id="hmin"></label>
+    <label>maxReplicas: <b id="hmaxV">10</b><input class="input" type="range" min="2" max="30" value="10" id="hmax"></label>
+  </div>
+  <div class="pipe-out" id="hOut"></div>
+  <div id="hViz" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px"></div>
+</div>`;
+function initHpa(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const ids = ["hr", "hu", "ht", "hmin", "hmax"]; ids.forEach(i => $("#" + i + "V").textContent = $("#" + i).value);
+    const r = +$("#hr").value, u = +$("#hu").value, t = +$("#ht").value, mn = +$("#hmin").value, mx = Math.max(+$("#hmax").value, mn);
+    const ratio = u / t, raw = Math.ceil(r * ratio);
+    const inTol = Math.abs(ratio - 1) <= 0.1;
+    let want = inTol ? r : raw; const clamped = Math.min(mx, Math.max(mn, want));
+    let h = `ratio = ${u}% / ${t}% = <b>${ratio.toFixed(2)}</b><br>desired = ceil(${r} × ${ratio.toFixed(2)}) = <b>${raw}</b>`;
+    if (inTol) h += `<br><span style="color:var(--amber)">within ±10% tolerance → no change</span>`;
+    if (clamped !== want) h += `<br>clamped to [${mn}, ${mx}] → <b>${clamped}</b>`;
+    h += `<br>${clamped > r ? `<span style="color:var(--green)">↑ scale up ${r} → ${clamped} (immediately by default)</span>` : clamped < r ? `<span style="color:var(--k8s-2)">↓ scale down ${r} → ${clamped} after the 300 s stabilization window (highest recommendation in the window wins)</span>` : "<span class='muted'>= stay</span>"}`;
+    $("#hOut").innerHTML = h;
+    $("#hViz").innerHTML = Array.from({ length: Math.max(r, clamped) }, (_, i) => `<span class="pill ${i < Math.min(r, clamped) ? "b" : i < clamped ? "g glow" : "r"}">pod ${i + 1}</span>`).join("");
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = go); go();
+}
+
+K8S_RENDER({
+  id: "26-autoscaling", group: "scheduling", minutes: 30,
+  title: '<span class="grad-text">Autoscaling</span>: HPA, VPA & nodes',
+  lead: "Three dimensions: more Pods (horizontal), bigger Pods (vertical), more nodes (cluster). They interact: HPA adds Pods, Pods don't fit, node autoscaler adds nodes.",
+  parts: [["Metrics", "metrics-server & APIs"], ["HPA", "Algorithm and behavior"], ["VPA & in-place", "Right-size requests"], ["Nodes", "Cluster Autoscaler, Karpenter"], ["Event-driven", "KEDA & scale to zero"]],
+  sections: [
+    { id: "metrics", title: "Where autoscalers get metrics", toc: "Metrics",
+      blocks: [
+        { type: "table", head: ["API", "Served by", "Used for"], rows: [
+          ["<code>metrics.k8s.io</code>", "metrics-server (an add-on, scrapes kubelets)", "CPU/memory per Pod and node; <code>kubectl top</code>; HPA resource metrics"],
+          ["<code>custom.metrics.k8s.io</code>", "Prometheus Adapter, KEDA, Datadog…", "Per-object app metrics (requests/s per Pod)"],
+          ["<code>external.metrics.k8s.io</code>", "Prometheus Adapter, KEDA, cloud adapters", "Metrics not tied to a Kubernetes object (queue length, SQS depth)"]
+        ] },
+        { type: "term", title: "install metrics-server", lines: [
+          "$ kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
+          "$ kubectl top nodes",
+          "$ kubectl top pods -n crash-course --containers",
+          "$ kubectl get apiservice v1beta1.metrics.k8s.io",
+          "✓ HPA on CPU needs metrics-server AND resource requests on the containers"
+        ] }
+      ] },
+    { id: "hpa", title: "HorizontalPodAutoscaler", toc: "HPA",
+      lead: "A control loop (every 15 s) in kube-controller-manager: read metric, compute desired replicas, write the target's <code>scale</code> subresource.",
+      blocks: [
+        { type: "custom", html: hpaHtml, init: initHpa },
+        { type: "yaml", title: "hpa.yaml for game-service", lines: [
+          ["apiVersion: autoscaling/v2", "<b>v2</b> supports multiple metrics and behavior. autoscaling/v1 only knows CPU."],
+          ["kind: HorizontalPodAutoscaler", ""],
+          ["metadata: {name: game-service, namespace: crash-course}", ""],
+          ["spec:", ""],
+          ["  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: game-service}", "Anything with a <code>/scale</code> subresource: Deployment, StatefulSet, ReplicaSet, CRDs."],
+          ["  minReplicas: 2", ""],
+          ["  maxReplicas: 10", ""],
+          ["  metrics:", "With several metrics the HPA computes each and takes the <b>largest</b> replica count."],
+          ["  - type: Resource", ""],
+          ["    resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}", "Utilization is relative to the container's <b>request</b>. No request → HPA can't compute it."],
+          ["  - type: Pods", ""],
+          ["    pods: {metric: {name: http_requests_per_second}, target: {type: AverageValue, averageValue: \"50\"}}", "Custom metric via an adapter: 50 req/s per Pod."],
+          ["  behavior:", "Tune speed and stability."],
+          ["    scaleDown:", ""],
+          ["      stabilizationWindowSeconds: 300", "Default 300 s for scale-down: avoids flapping."],
+          ["      policies: [{type: Percent, value: 50, periodSeconds: 60}]", "Remove at most 50% of Pods per minute."],
+          ["    scaleUp:", ""],
+          ["      stabilizationWindowSeconds: 0", "Scale up immediately (default)."],
+          ["      tolerance: 0.05", "Per-HPA tolerance (stable since v1.37); default is the cluster-wide 10%."]
+        ] },
+        { type: "term", title: "quick start", lines: [
+          "$ kubectl autoscale deploy game-service -n crash-course --cpu-percent=60 --min=2 --max=10",
+          "$ kubectl get hpa -n crash-course -w",
+          "NAME           REFERENCE                 TARGETS        MINPODS  MAXPODS  REPLICAS",
+          "game-service   Deployment/game-service   cpu: 92%/60%   2        10       4",
+          "$ kubectl describe hpa game-service -n crash-course    # conditions: AbleToScale, ScalingActive, ScalingLimited",
+          "$ kubectl run load --rm -it --image=busybox:1.36 -- sh -c 'while true; do wget -qO- http://game-service.crash-course:8081/users/scores; done'"
+        ] },
+        { type: "callout", kind: "warn", html: "If an HPA manages a Deployment, remove <code>replicas</code> from the Deployment manifest in Git. Otherwise every apply resets the count and fights the HPA (see server-side apply in <a href=\"23-objects-and-metadata.html#management\">Objects & metadata</a>)." }
+      ] },
+    { id: "vpa", title: "VPA and in-place Pod resize", toc: "VPA & in-place",
+      lead: "Most clusters waste money on guessed requests. The Vertical Pod Autoscaler (an add-on with CRDs in <code>autoscaling.k8s.io/v1</code>) recommends and applies right-sized requests.",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["🧠", "Recommender", "Watches CPU/memory usage history and OOM events; writes target, lower and upper bounds to the VPA status."],
+          ["♻️", "Updater", "Applies changes to running Pods by eviction or, when supported, in place. Respects PodDisruptionBudgets."],
+          ["🪝", "Admission controller", "Mutating webhook that sets recommended requests on new Pods."]
+        ] },
+        { type: "table", head: ["updateMode", "Effect"], rows: [
+          ["<code>Off</code>", "Recommend only: read <code>kubectl describe vpa</code> and update manifests yourself. Safest start."],
+          ["<code>Initial</code>", "Apply at Pod creation only."],
+          ["<code>Recreate</code>", "Evict Pods whose requests drift too far from the recommendation."],
+          ["<code>InPlaceOrRecreate</code>", "Resize running Pods in place when possible, otherwise evict. Uses in-place Pod resize."],
+          ["<code>Auto</code>", "Deprecated alias; prefer an explicit mode."]
+        ] },
+        { type: "code", title: "in-place Pod resize (core Kubernetes, stable since v1.35)", code: `# resize a running Pod's CPU without restarting it (resize subresource)
+kubectl patch pod game-service-7c9f -n crash-course --subresource resize --patch \\
+  '{"spec":{"containers":[{"name":"game-service","resources":{"requests":{"cpu":"500m"},"limits":{"cpu":"1"}}}]}}'
+
+# per-container policy: restart for memory changes (e.g. JVM heap), not for CPU
+resizePolicy:
+- resourceName: cpu
+  restartPolicy: NotRequired
+- resourceName: memory
+  restartPolicy: RestartContainer
+
+kubectl get pod game-service-7c9f -o jsonpath='{.status.containerStatuses[0].resources}'` },
+        { type: "callout", kind: "warn", html: "Don't let HPA and VPA both act on CPU/memory for the same workload: VPA raises requests, utilization % drops, HPA scales in, and they oscillate. Common split: HPA on custom metrics (req/s), VPA on CPU/memory, or VPA in <code>Off</code> mode for sizing advice." }
+      ] },
+    { id: "nodes", title: "Node autoscaling", toc: "Nodes",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📈", "HPA", "HPA adds Pods", "Load rises; HPA scales game-service from 4 to 10."],
+          ["⏳", "Pending", "Pods don't fit", "Scheduler can't place 3 Pods: <code>0/3 nodes are available: Insufficient cpu</code>."],
+          ["🔍", "Simulate", "Autoscaler simulates", "Cluster Autoscaler checks which node group would let them schedule; Karpenter computes a best-fit instance type directly."],
+          ["🖥️", "Provision", "New node joins", "Cloud API creates a VM; kubelet registers; Pending Pods are scheduled. Typically 1–3 minutes."],
+          ["📉", "Consolidate", "Scale down later", "Underused nodes are drained (respecting PDBs) and removed."]
+        ] },
+        { type: "compare", cols: [
+          { title: "Cluster Autoscaler", chip: "node groups", chipClass: "blue", color: "var(--k8s-2)", items: ["Scales pre-defined node groups (ASGs, node pools)", "Supported on almost every provider", "Mature and predictable", "Managed versions: GKE, AKS, SKS node pools"] },
+          { title: "Karpenter", chip: "group-less", chipClass: "green", color: "var(--green)", items: ["Picks instance types per batch of Pods (NodePool + NodeClass CRDs)", "Fast provisioning, spot-aware consolidation", "AWS first; Azure provider available", "Kubernetes SIG Autoscaling project"] }
+        ] },
+        { type: "callout", kind: "info", html: "Autoscalers decide on <b>requests</b>, not real usage. Pods without requests never trigger scale-up and get packed badly. Requests also matter for scale-down: a node can only be removed if its Pods fit elsewhere." }
+      ] },
+    { id: "keda", title: "Event-driven autoscaling with KEDA", toc: "Event-driven",
+      blocks: [
+        { type: "code", title: "KEDA ScaledObject (CNCF graduated)", code: `apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  scaleTargetRef:
+    name: worker               # Deployment
+  minReplicaCount: 0           # scale to zero when the queue is empty
+  maxReplicaCount: 50
+  triggers:
+  - type: rabbitmq
+    metadata:
+      queueName: jobs
+      mode: QueueLength
+      value: "20"              # one replica per 20 messages
+# KEDA creates and drives an HPA for 1..N, and handles 0 ↔ 1 itself` }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📊", "metrics-server first", "HPA CPU/memory and kubectl top depend on it."],
+      ["🧮", "desired = ceil(n × cur/target)", "±10% tolerance; scale-down waits 300 s by default."],
+      ["📏", "Requests are the base", "Utilization % and node autoscaling both use requests."],
+      ["🎚️", "VPA right-sizes", "Start in Off mode; in-place resize is GA in v1.35."],
+      ["🖥️", "Nodes follow Pending Pods", "Cluster Autoscaler or Karpenter."],
+      ["0️⃣", "KEDA scales to zero", "Queue- and event-driven scaling."]
+    ],
+    cheat: `kubectl top nodes; kubectl top pods -A --sort-by=cpu
+kubectl autoscale deploy web --cpu-percent=60 --min=2 --max=10
+kubectl get hpa -w; kubectl describe hpa web
+kubectl get vpa; kubectl describe vpa web      # recommendations
+kubectl patch pod p --subresource resize --patch '{…}'
+kubectl get events --field-selector reason=TriggeredScaleUp -A`,
+    quiz: [
+      ["4 replicas at 90% CPU, target 60%. Desired?", ["4", "5", "6", "9"], 2, "ceil(4 × 1.5) = 6."],
+      ["Why does an HPA show <unknown>/60%?", ["Too many replicas", "metrics-server missing or containers have no CPU request", "RBAC", "Wrong apiVersion"], 1, "Utilization needs both metrics and requests."],
+      ["Which VPA mode never touches Pods?", ["Initial", "Recreate", "Off", "InPlaceOrRecreate"], 2, "Off only writes recommendations."],
+      ["What triggers Cluster Autoscaler to add a node?", ["High node CPU usage", "Pods Pending because they don't fit on existing nodes", "An HPA event", "A cron schedule"], 1, "It reacts to unschedulable Pods."],
+      ["Scale a queue worker to zero replicas when idle?", ["HPA minReplicas: 0 (default)", "KEDA ScaledObject with minReplicaCount: 0", "VPA", "PDB"], 1, "KEDA handles activation from 0."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

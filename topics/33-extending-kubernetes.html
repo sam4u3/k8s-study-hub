@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extending Kubernetes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// CRD schema validator: checks a GameServer object against the CRD's OpenAPI + CEL rules.
+const crdHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>spec.game<select class="input" id="cGame"><option>snake</option><option>tictactoe</option><option>chess</option></select></label>
+    <label>spec.maxPlayers: <b id="cMaxV">4</b><input class="input" type="range" min="0" max="120" value="4" id="cMax"></label>
+    <label>spec.minPlayers: <b id="cMinV">2</b><input class="input" type="range" min="0" max="10" value="2" id="cMin"></label>
+    <label>extra field<select class="input" id="cX"><option value="">none</option><option value="colour">spec.colour: red</option></select></label>
+  </div>
+  <div class="pipe-out" id="cOut"></div>
+</div>`;
+function initCrd(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const g = $("#cGame").value, mx = +$("#cMax").value, mn = +$("#cMin").value, x = $("#cX").value;
+    $("#cMaxV").textContent = mx; $("#cMinV").textContent = mn;
+    const e = [];
+    if (!["snake", "tictactoe", "memory", "rps"].includes(g)) e.push(`spec.game: Unsupported value: "${g}": supported values: "snake", "tictactoe", "memory", "rps"`);
+    if (mx < 1 || mx > 100) e.push(`spec.maxPlayers: Invalid value: ${mx}: must be ${mx < 1 ? "greater than or equal to 1" : "less than or equal to 100"}`);
+    if (mn > mx) e.push(`spec: Invalid value: "object": minPlayers must be <= maxPlayers   (x-kubernetes-validations CEL rule)`);
+    let out = `<span class="faint">$ kubectl apply -f arena.yaml</span><br>`;
+    if (x) out += `<span style="color:var(--amber)">Warning: unknown field "spec.colour" (pruned: structural schemas drop unknown fields)</span><br>`;
+    out += e.length ? `<span style="color:var(--red)">The GameServer "arena" is invalid:<br>${e.map(m => "* " + m).join("<br>")}</span>` : `<span style="color:var(--green)">gameserver.games.example.com/arena created</span>`;
+    $("#cOut").innerHTML = out;
+  };
+  el.querySelectorAll("input,select").forEach(i => i.oninput = i.onchange = go); go();
+}
+
+K8S_RENDER({
+  id: "33-extending", group: "advanced", minutes: 35,
+  title: '<span class="grad-text">Extending</span> Kubernetes',
+  lead: "Kubernetes is a platform for building platforms. You can add your own resource types, controllers that act on them, whole API servers, and policies that intercept every request. CloudNativePG, cert-manager and Gateway API all use these exact mechanisms.",
+  parts: [["Extension points", "Where you can plug in"], ["CRDs", "Your own kinds, with validation"], ["Operators", "Controllers for your CRDs"], ["Aggregation", "Extra API servers"], ["Admission", "Webhooks and CEL policies"]],
+  sections: [
+    { id: "points", title: "Extension points", toc: "Extension points",
+      blocks: [
+        { type: "table", head: ["Where", "Mechanism", "Example"], rows: [
+          ["kubectl", "Plugins (<code>kubectl-*</code> on PATH, krew)", "<code>kubectl cnpg status</code>"],
+          ["API: new types", "CustomResourceDefinition", "Cluster (CNPG), Certificate, HTTPRoute"],
+          ["API: new servers", "API aggregation (APIService)", "metrics-server (<code>metrics.k8s.io</code>)"],
+          ["Request path", "Authentication/authorization webhooks", "OIDC, OPA"],
+          ["Request path", "Admission webhooks, ValidatingAdmissionPolicy, MutatingAdmissionPolicy", "Kyverno, Gatekeeper, Istio sidecar injection"],
+          ["Control loops", "Controllers / operators", "CNPG operator, Argo CD"],
+          ["Scheduler", "Scheduler framework plugins, extra schedulers", "Volcano, Kueue integration"],
+          ["Nodes", "CRI, CNI, CSI, device plugins, DRA drivers", "containerd, Cilium, EBS CSI, NVIDIA"]
+        ] }
+      ] },
+    { id: "crd", title: "CustomResourceDefinitions", toc: "CRDs",
+      blocks: [
+        { type: "yaml", title: "gameservers.games.example.com", lines: [
+          ["apiVersion: apiextensions.k8s.io/v1", ""],
+          ["kind: CustomResourceDefinition", ""],
+          ["metadata:", ""],
+          ["  name: gameservers.games.example.com", "Must be <code>&lt;plural&gt;.&lt;group&gt;</code>."],
+          ["spec:", ""],
+          ["  group: games.example.com", "Use a domain you own to avoid collisions."],
+          ["  scope: Namespaced", "Or Cluster."],
+          ["  names: {kind: GameServer, plural: gameservers, singular: gameserver, shortNames: [gs]}", "Enables <code>kubectl get gs</code>."],
+          ["  versions:", ""],
+          ["  - name: v1alpha1", ""],
+          ["    served: true", "API server serves this version."],
+          ["    storage: true", "Exactly one version is the storage version in etcd. Multiple versions need a conversion webhook unless schemas are identical."],
+          ["    subresources: {status: {}, scale: {specReplicasPath: .spec.replicas, statusReplicasPath: .status.replicas}}", "<b>status</b> subresource: spec and status updated separately (controllers write status). <b>scale</b>: HPA and kubectl scale work."],
+          ["    additionalPrinterColumns: [{name: Game, type: string, jsonPath: .spec.game}]", "Columns in <code>kubectl get</code>."],
+          ["    schema:", "<b>Structural OpenAPI v3 schema</b> (required). Unknown fields are pruned."],
+          ["      openAPIV3Schema:", ""],
+          ["        type: object", ""],
+          ["        properties:", ""],
+          ["          spec:", ""],
+          ["            type: object", ""],
+          ["            required: [game]", ""],
+          ["            x-kubernetes-validations:", "<b>CEL rules</b>: cross-field validation without a webhook."],
+          ["            - {rule: \"self.minPlayers <= self.maxPlayers\", message: \"minPlayers must be <= maxPlayers\"}", ""],
+          ["            properties:", ""],
+          ["              game: {type: string, enum: [snake, tictactoe, memory, rps]}", ""],
+          ["              maxPlayers: {type: integer, minimum: 1, maximum: 100, default: 4}", "<code>default</code> is applied on read and write."],
+          ["              minPlayers: {type: integer, minimum: 0, default: 1}", ""]
+        ] },
+        { type: "h3", text: "Validate a custom resource" },
+        { type: "custom", html: crdHtml, init: initCrd }
+      ] },
+    { id: "operators", title: "The operator pattern", toc: "Operators",
+      lead: "A CRD alone is just data in etcd. An operator is a controller that watches it and makes reality match, encoding what a human operator would do.",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📄", "CR", "User applies a GameServer", "<code>kind: GameServer, spec.game: snake</code> is stored like any object."],
+          ["👀", "Watch", "Operator's informer sees it", "client-go informers keep a local cache and fire add/update/delete events onto a work queue."],
+          ["🔧", "Reconcile", "Reconcile()", "Read desired spec, read actual children (Deployment, Service), create or patch them. Set ownerReferences so GC cleans up."],
+          ["🧾", "Status", "Write status + conditions", "<code>status.conditions: [{type: Ready, status: \"True\"}]</code>, <code>observedGeneration</code>."],
+          ["⛔", "Finalize", "Handle deletion", "A finalizer lets the operator release external resources (cloud LB, DNS) before the object disappears."]
+        ] },
+        { type: "code", title: "kubebuilder scaffold (Go)", code: `kubebuilder init --domain example.com --repo github.com/you/game-operator
+kubebuilder create api --group games --version v1alpha1 --kind GameServer
+# edit api/v1alpha1/gameserver_types.go (spec/status + markers like +kubebuilder:validation:Maximum=100)
+# implement Reconcile in internal/controller/gameserver_controller.go
+make manifests install run        # generate CRDs, install, run locally against your kubeconfig` },
+        { type: "callout", kind: "tip", html: "Before writing an operator, check OperatorHub/Artifact Hub. Mature operators exist for most databases, queues and certificates (CNPG, Strimzi, cert-manager). Alternatives to Go: Operator SDK with Ansible/Helm, kopf (Python), Java Operator SDK, or Metacontroller." }
+      ] },
+    { id: "aggregation", title: "API aggregation", toc: "Aggregation",
+      blocks: [
+        { type: "p", html: "An <code>APIService</code> tells kube-apiserver to proxy a whole group/version to another server running in the cluster. Unlike CRDs, the extension server controls storage and logic completely: useful for computed data that shouldn't live in etcd." },
+        { type: "term", title: "see it", lines: [
+          "$ kubectl get apiservices | grep -v Local",
+          "v1beta1.metrics.k8s.io   kube-system/metrics-server   True   20d",
+          "$ kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes | jq '.items[0].usage'",
+          "✓ kubectl top works because metrics-server registered an aggregated API"
+        ] },
+        { type: "compare", cols: [
+          { title: "CRD", chip: "most cases", chipClass: "green", color: "var(--green)", items: ["No extra server to run", "Stored in etcd, works with kubectl, RBAC, watch", "Validation via schema + CEL", "Good for declarative config objects"] },
+          { title: "Aggregated API", chip: "special cases", chipClass: "amber", color: "var(--amber)", items: ["You run and secure an API server", "Custom storage (or none), custom verbs/subresources", "Protobuf, long-running connections", "Good for computed or high-volume data"] }
+        ] }
+      ] },
+    { id: "admission", title: "Admission control: webhooks and CEL policies", toc: "Admission",
+      blocks: [
+        { type: "pipeline", stages: [["AuthN/AuthZ", ""], ["Mutating admission", "webhooks + MutatingAdmissionPolicy"], ["Schema validation", ""], ["Validating admission", "webhooks + ValidatingAdmissionPolicy"], ["etcd", ""]],
+          scenarios: [
+            { label: "Pod without labels", notes: ["", "MAP adds label team=unknown", "", "VAP: labels present ✓", ""], out: '<span style="color:var(--green)">✓ created with injected default label</span>' },
+            { label: "Image from docker.io", path: [0, 1, 2, 3], fail: 3, notes: ["", "", ""], out: '<span style="color:var(--red)">✗ denied: images must come from registry.example.com</span>' },
+            { label: "Webhook server down (failurePolicy: Fail)", path: [0, 1], fail: 1, out: '<span style="color:var(--red)">✗ Internal error: failed calling webhook "inject.example.com": context deadline exceeded. All matching requests blocked!</span>' }
+          ] },
+        { type: "tabs", tabs: [
+          { label: "MutatingAdmissionPolicy (CEL)", blocks: [{ type: "code", title: "stable since v1.36: mutate without a webhook", code: `apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: default-team-label
+spec:
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE"]
+      resources: ["pods"]
+  matchConditions:
+  - name: no-team-label
+    expression: '!has(object.metadata.labels) || !("team" in object.metadata.labels)'
+  reinvocationPolicy: IfNeeded
+  mutations:
+  - patchType: ApplyConfiguration
+    applyConfiguration:
+      expression: 'Object{metadata: Object.metadata{labels: {"team": "unknown"}}}'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: default-team-label
+spec:
+  policyName: default-team-label` }] },
+          { label: "ValidatingAdmissionPolicy", blocks: [{ type: "code", title: "allowed registries", code: `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: allowed-registries
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["pods"]
+  validations:
+  - expression: 'object.spec.containers.all(c, c.image.startsWith("registry.example.com/"))'
+    message: "images must come from registry.example.com"` }] },
+          { label: "Webhook", blocks: [{ type: "code", title: "ValidatingWebhookConfiguration", code: `apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: policy.example.com
+webhooks:
+- name: pods.policy.example.com
+  clientConfig:
+    service: {namespace: policy, name: webhook, path: /validate}
+    caBundle: <base64 CA>
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    operations: ["CREATE"]
+    resources: ["pods"]
+  namespaceSelector:              # never block the system namespaces
+    matchExpressions:
+    - {key: kubernetes.io/metadata.name, operator: NotIn, values: [kube-system, policy]}
+  failurePolicy: Fail
+  timeoutSeconds: 5
+  sideEffects: None
+  admissionReviewVersions: ["v1"]` }] }
+        ] },
+        { type: "callout", kind: "warn", html: "Webhook good practices: exclude <code>kube-system</code> and the webhook's own namespace, keep timeouts short, run several replicas with a PDB, and prefer CEL policies (no server to break) when the logic fits." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧩", "CRD = new kind", "Structural schema, CEL rules, status/scale subresources."],
+      ["🔁", "Operator = CRD + controller", "Reconcile, ownerReferences, status, finalizers."],
+      ["🛰️", "Aggregation for special APIs", "metrics.k8s.io is the classic example."],
+      ["✍️", "MutatingAdmissionPolicy", "CEL mutations, GA v1.36; no webhook server."],
+      ["✅", "ValidatingAdmissionPolicy", "CEL validation, GA v1.30."],
+      ["⚠️", "Webhooks can block everything", "Exclude system namespaces; set timeouts."]
+    ],
+    cheat: `kubectl get crd; kubectl explain gameserver.spec
+kubectl api-resources --api-group=games.example.com
+kubectl get apiservices
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations
+kubectl get validatingadmissionpolicies,mutatingadmissionpolicies
+kubectl get --raw /apis/games.example.com/v1alpha1`,
+    quiz: [
+      ["Where is cross-field validation (min <= max) best done for a CRD?", ["A webhook always", "x-kubernetes-validations CEL rule in the schema", "In kubectl", "Not possible"], 1, "CEL in the CRD schema runs in the API server."],
+      ["What makes a CRD 'do' something?", ["The schema", "A controller/operator watching it", "etcd", "kubectl"], 1, "CRDs only store data."],
+      ["kubectl top works because…", ["metrics-server is a CRD", "metrics-server registers an aggregated APIService", "kubelet exposes kubectl", "Prometheus"], 1, "metrics.k8s.io is served by aggregation."],
+      ["A webhook with failurePolicy: Fail is down. Effect?", ["Ignored", "All matching requests are rejected", "Only warnings", "API server restarts"], 1, "Which is why you exclude system namespaces."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Access and Hardening</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Hardening checklist with per-browser progress.
+const CHK = [
+  ["Authentication", ["Humans use OIDC/SSO, not shared client certs", "No long-lived ServiceAccount token Secrets; use bound tokens", "Anonymous auth limited to health endpoints", "system:masters kubeconfigs stored offline, break-glass only"]],
+  ["Authorization", ["RBAC + Node authorizer enabled; no ABAC", "No wildcard (*) verbs/resources in custom roles", "list/watch secrets and create pods granted sparingly (both expose Secrets)", "escalate, bind, impersonate restricted to admins"]],
+  ["Workloads", ["Pod Security 'baseline' enforced everywhere, 'restricted' where possible", "Requests/limits and ResourceQuotas in every namespace", "automountServiceAccountToken: false where the API isn't needed", "Images from trusted registries, pinned by digest, scanned"]],
+  ["Network", ["Default-deny NetworkPolicies per namespace", "Cloud metadata endpoint blocked from Pods", "API server not exposed publicly (or behind allow-listed IPs)", "kubelet API requires authn/authz (anonymous off)"]],
+  ["Data & audit", ["Encryption at rest for Secrets (KMS v2)", "etcd reachable only by the API server, mTLS", "Audit logging enabled and shipped off-cluster", "Regular upgrades within supported versions"]]
+];
+const chkHtml = `<div class="sim glass"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><b>Cluster security checklist</b><span class="chip" id="hProg"></span></div><div id="hList" style="display:grid;gap:14px"></div></div>`;
+function initChk(el) {
+  const KEY = "k8s-hardening-checklist"; let d = {}; try { d = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
+  const total = CHK.reduce((a, c) => a + c[1].length, 0);
+  const draw = () => {
+    el.querySelector("#hList").innerHTML = CHK.map(([g, items], gi) => `<div><div class="faint" style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${g}</div>${items.map((t, i) => { const k = gi + "." + i; return `<label class="box" style="display:flex;gap:10px;align-items:center;padding:8px 12px;margin-bottom:6px;cursor:pointer;${d[k] ? "border-color:rgba(52,211,153,.5)" : ""}"><input type="checkbox" data-k="${k}" ${d[k] ? "checked" : ""}><span style="font-size:13.5px;${d[k] ? "color:var(--muted)" : ""}">${t}</span></label>`; }).join("")}</div>`).join("");
+    el.querySelector("#hProg").textContent = `${Object.values(d).filter(Boolean).length} / ${total}`;
+    el.querySelectorAll("[data-k]").forEach(c => c.onchange = () => { d[c.dataset.k] = c.checked; try { localStorage.setItem(KEY, JSON.stringify(d)); } catch (e) {} draw(); });
+  };
+  draw();
+}
+
+K8S_RENDER({
+  id: "32-api-security", group: "security", minutes: 30,
+  title: 'API access control & <span class="grad-text">hardening</span>',
+  lead: "The API server is the cluster's front door. This topic covers every way in (authentication), every check on the way (authorization, admission), the side doors that bypass it, and the habits that keep Secrets secret.",
+  parts: [["Authentication", "Certs, tokens, OIDC"], ["Authorization", "Node, RBAC, Webhook"], ["Impersonation", "Acting as someone else"], ["Bypass risks", "Ways around the API"], ["Secrets & tenancy", "Good practices"], ["Checklist", "Track your hardening"]],
+  sections: [
+    { id: "authn", title: "Authentication methods", toc: "Authentication",
+      blocks: [
+        { type: "table", head: ["Method", "Typical user", "Notes"], rows: [
+          ["X.509 client certificates", "Admins, kubelets, control-plane components", "CN = user, O = groups. Can't be revoked: keep short-lived (see Topic 01)"],
+          ["ServiceAccount tokens (bound JWT)", "Workloads", "Audience- and time-bound; projected into Pods; <code>kubectl create token</code>"],
+          ["OIDC (OpenID Connect)", "Humans via SSO (Entra ID, Google, Keycloak, Dex)", "API server validates ID tokens; kubectl uses an exec plugin (kubelogin) to fetch them"],
+          ["Structured authentication config", "Multiple OIDC issuers, CEL claim mappings", "<code>--authentication-config</code> file (stable since v1.34); reloadable without restart"],
+          ["Webhook token authentication", "Custom identity systems", "API server asks an external service via TokenReview"],
+          ["Authenticating proxy", "Front-door proxies", "Trusted proxy sets X-Remote-User headers (mTLS-protected)"],
+          ["Bootstrap tokens", "Joining nodes", "Short-lived; used by kubeadm join"]
+        ] },
+        { type: "code", title: "AuthenticationConfiguration (OIDC with CEL claim mapping)", code: `apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+- issuer:
+    url: https://sso.example.com/realms/platform
+    audiences: ["kubernetes"]
+  claimMappings:
+    username:
+      expression: '"oidc:" + claims.email'
+    groups:
+      expression: 'claims.groups'
+  claimValidationRules:
+  - expression: 'claims.email_verified == true'
+    message: "email must be verified"
+anonymous:                      # stable since v1.34: allow anonymous only where needed
+  enabled: true
+  conditions:
+  - path: /livez
+  - path: /readyz
+  - path: /healthz` }
+      ] },
+    { id: "authz", title: "Authorization modes", toc: "Authorization",
+      blocks: [
+        { type: "pipeline", intro: "Authorizers are consulted in order. The first to allow or deny decides; 'no opinion' passes to the next. If all have no opinion, the request is denied.",
+          stages: [["Node", "kubelets: only their own Pods/Secrets"], ["RBAC", "Roles & bindings"], ["Webhook", "external policy (e.g. OPA)"], ["Default", "deny"]],
+          scenarios: [
+            { label: "kubelet reads a Secret for its Pod", path: [0], notes: ["Node authorizer: Secret is referenced by a Pod bound to this node → allow"], out: '<span style="color:var(--green)">✓ allowed by Node</span>' },
+            { label: "kubelet reads a random Secret", path: [0, 1, 2, 3], fail: 3, notes: ["no opinion (not related to its Pods)", "no binding for system:node:wk1", "no opinion"], out: '<span style="color:var(--red)">✗ 403: node isolation working as intended</span>' },
+            { label: "developer lists Pods in dev", path: [0, 1], notes: ["not a node → no opinion", "RoleBinding grants list pods → allow"], out: '<span style="color:var(--green)">✓ allowed by RBAC</span>' }
+          ] },
+        { type: "callout", kind: "info", html: "Configure the chain with <code>--authorization-config</code> (structured authorization, stable since v1.32), which supports multiple webhooks with CEL match conditions and timeouts. kubeadm defaults to <code>Node,RBAC</code>. The NodeRestriction admission plugin complements the Node authorizer by stopping kubelets from modifying other nodes' objects." }
+      ] },
+    { id: "impersonation", title: "Impersonation", toc: "Impersonation",
+      blocks: [
+        { type: "p", html: "Any user with the <code>impersonate</code> verb can act as another user, group or ServiceAccount. kubectl's <code>--as</code> and <code>--as-group</code> use it. It's how you test RBAC and how some proxies and dashboards work, which also makes it a powerful privilege to guard." },
+        { type: "code", title: "impersonation", code: `# test what a user can do
+kubectl auth can-i --list --as=jane --as-group=dev-team -n dev
+kubectl get pods -n dev --as=system:serviceaccount:dev:ci-bot
+
+# role allowing impersonation of one group only
+rules:
+- apiGroups: [""]
+  resources: ["groups"]
+  verbs: ["impersonate"]
+  resourceNames: ["dev-team"]` },
+        { type: "callout", kind: "warn", html: "Impersonating <code>system:masters</code> equals cluster-admin. Constrained impersonation (beta since v1.36) narrows impersonation to specific actions; until you use it, treat <code>impersonate</code> like cluster-admin." }
+      ] },
+    { id: "bypass", title: "API server bypass risks", toc: "Bypass risks",
+      lead: "All the RBAC in the world doesn't help if someone can skip the API server.",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["💾", "Direct etcd access", "etcd holds every Secret. Anyone with etcd client certs or a backup file owns the cluster. Firewall it, mTLS only, encrypt backups."],
+          ["🤖", "kubelet API (:10250)", "Can exec into any Pod on the node. Keep <code>--anonymous-auth=false</code> and webhook authorization on."],
+          ["📄", "Static Pod manifests", "Write access to <code>/etc/kubernetes/manifests</code> = run anything, privileged, bypassing admission."],
+          ["🐳", "Container runtime socket", "Access to containerd.sock = create privileged containers outside Kubernetes. Never mount it into Pods."],
+          ["🖥️", "Node root", "A privileged or hostPath Pod reaches node credentials (kubelet kubeconfig). Pod Security prevents this."],
+          ["☁️", "Cloud metadata", "Pods reaching 169.254.169.254 may get node IAM credentials. Block with NetworkPolicy or IMDSv2 hop limits."]
+        ] }
+      ] },
+    { id: "secrets", title: "Secrets good practices and multi-tenancy", toc: "Secrets & tenancy",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Secrets", chip: "good practices", chipClass: "blue", color: "var(--k8s-2)", items: ["Encrypt at rest (KMS v2 provider)", "RBAC: who can <code>get/list/watch secrets</code>; remember <code>create pods</code> can mount any Secret in the namespace", "Prefer volume mounts over env vars (env leaks into crash dumps and child processes)", "External stores via External Secrets Operator or Secrets Store CSI driver", "Rotate; mark immutable where possible"] },
+          { title: "Multi-tenancy", chip: "soft vs hard", chipClass: "violet", color: "var(--violet)", items: ["<b>Soft</b> (teams in one org): namespace per team + RBAC + quotas + NetworkPolicy + Pod Security", "<b>Hard</b> (untrusted tenants): sandboxed runtimes (gVisor, Kata), dedicated nodes via taints, or virtual clusters (vcluster)", "Control-plane fairness via API Priority and Fairness", "Cluster per tenant when isolation must be absolute"] }
+        ] }
+      ] },
+    { id: "checklist", title: "Security checklist", toc: "Checklist",
+      lead: "Condensed from the official Kubernetes security checklist. Tick items as you harden your own cluster; progress is saved in this browser.",
+      blocks: [{ type: "custom", html: chkHtml, init: initChk }] }
+  ],
+  summary: {
+    takeaways: [
+      ["🪪", "OIDC for humans", "Structured authentication config is GA (v1.34)."],
+      ["🎫", "Bound tokens for workloads", "No long-lived token Secrets."],
+      ["🔗", "Node → RBAC → Webhook", "First decision wins; default deny."],
+      ["🎭", "Impersonate is powerful", "Guard it like cluster-admin."],
+      ["🚪", "Close the side doors", "etcd, kubelet, runtime socket, static Pods, metadata."],
+      ["🏢", "Tenancy needs layers", "Namespaces + RBAC + quotas + policies + Pod Security."]
+    ],
+    cheat: `kubectl auth whoami
+kubectl auth can-i --list --as=<user> -n <ns>
+kubectl get clusterrolebindings -o wide | grep -E 'cluster-admin|system:masters'
+kubectl get rolebindings,clusterrolebindings -A -o json | jq '.items[] | select(.subjects[]?.name=="system:anonymous")'
+kubectl get secrets -A --field-selector type=kubernetes.io/service-account-token`,
+    quiz: [
+      ["Best way to authenticate a team of 50 engineers?", ["Shared admin.conf", "One client cert each", "OIDC via your identity provider", "Static token file"], 2, "Central lifecycle, groups and revocation."],
+      ["Which authorizer limits kubelets to their own Pods' Secrets?", ["RBAC", "Node", "Webhook", "ABAC"], 1, "Plus the NodeRestriction admission plugin."],
+      ["Which grant effectively exposes all Secrets in a namespace?", ["get configmaps", "create pods", "list services", "get events"], 1, "A Pod can mount any Secret in its namespace."],
+      ["Mounting /run/containerd/containerd.sock into a Pod gives…", ["Logs only", "Node-level container control, bypassing Kubernetes", "Nothing", "Read-only metrics"], 1, "A classic bypass path."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

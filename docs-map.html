@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs Coverage Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/glass.css">
+<style>
+  header { padding: 48px 0 20px; }
+  h1 { font-size: clamp(28px, 4.5vw, 46px); margin: 10px 0; letter-spacing: -.02em; }
+  .lead { color: var(--muted); max-width: 760px; }
+  .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 24px 0; }
+  .summary .glass { padding: 18px; }
+  .summary b { font-size: 28px; display: block; }
+  .bar { height: 8px; border-radius: 8px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 10px; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--k8s), var(--green)); width: 0; transition: width 1.2s; }
+  .sec { padding: 20px; margin-bottom: 16px; }
+  .sec-h { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; cursor: pointer; }
+  .sec-h h2 { margin: 0; font-size: 18px; }
+  .rows { display: grid; gap: 6px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 10px; background: rgba(255,255,255,.03); border: 1px solid var(--border); font-size: 14px; }
+  .row .links { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .row .links a { font-size: 12px; }
+  .tools { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .sec.closed .rows { display: none; }
+  @media (max-width: 760px) { .summary { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } .row .links { justify-content: flex-start; } }
+</style>
+</head>
+<body>
+<div class="progress-bar"></div>
+<div class="blobs"><span></span><span></span><span></span></div>
+<div class="container">
+  <header class="reveal">
+    <a href="index.html" style="color:var(--muted);font-size:13px">← Dashboard</a>
+    <h1>Kubernetes docs <span class="grad-text">coverage map</span></h1>
+    <p class="lead">Every page in the official <a href="https://kubernetes.io/docs/concepts/" target="_blank" rel="noopener">Concepts</a> section (v1.37 docs, October 2026), matched to the hub topic that teaches it. Gaps are listed honestly with a link to the official page.</p>
+  </header>
+  <div class="summary">
+    <div class="glass reveal"><b id="sCov">0</b><span class="muted">concept pages covered</span><div class="bar"><i id="sBar"></i></div></div>
+    <div class="glass reveal"><b id="sPart">0</b><span class="muted">partly covered</span></div>
+    <div class="glass reveal"><b id="sGap">0</b><span class="muted">not covered yet (linked to docs)</span></div>
+  </div>
+  <div class="tools glass" style="padding:12px">
+    <input class="input" id="q" type="search" placeholder="Filter docs pages…" style="max-width:300px">
+    <label class="muted" style="font-size:13px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="gaps"> Show gaps only</label>
+  </div>
+  <main id="map"></main>
+  <footer style="padding:30px 0 60px;color:var(--faint);font-size:13px;text-align:center">Docs structure from kubernetes.io. Kubernetes documentation is licensed CC BY 4.0.</footer>
+</div>
+<script src="assets/glass.js"></script>
+<script src="assets/topics.js"></script>
+<script>
+// [docs page title, docs path under /docs/concepts/, hub topic ids, coverage: "full" | "part" | "gap"]
+const MAP = [
+  ["Overview", [
+    ["Kubernetes Components", "overview/components/", ["06-architecture"], "full"],
+    ["Objects In Kubernetes", "overview/working-with-objects/", ["05-yaml", "23-objects"], "full"],
+    ["Object Management", "overview/working-with-objects/object-management/", ["23-objects", "05-yaml"], "full"],
+    ["Object Names and IDs", "overview/working-with-objects/names/", ["23-objects"], "full"],
+    ["Labels and Selectors", "overview/working-with-objects/labels/", ["14-scheduler", "23-objects"], "full"],
+    ["Namespaces", "overview/working-with-objects/namespaces/", ["14-scheduler", "23-objects"], "full"],
+    ["Annotations", "overview/working-with-objects/annotations/", ["23-objects"], "full"],
+    ["Field Selectors", "overview/working-with-objects/field-selectors/", ["23-objects"], "full"],
+    ["Finalizers", "overview/working-with-objects/finalizers/", ["23-objects"], "full"],
+    ["Owners and Dependents", "overview/working-with-objects/owners-dependents/", ["23-objects", "15-deployments"], "full"],
+    ["Recommended Labels", "overview/working-with-objects/common-labels/", ["23-objects"], "full"],
+    ["Storage Versions", "overview/working-with-objects/storage-version/", [], "gap"],
+    ["The Kubernetes API", "overview/kubernetes-api/", ["01-bootstrap"], "full"],
+    ["The kubectl command-line tool", "overview/kubectl/", ["05-yaml"], "part"]
+  ]],
+  ["Cluster Architecture", [
+    ["Nodes", "architecture/nodes/", ["06-architecture", "37-internals"], "full"],
+    ["Communication between Nodes and the Control Plane", "architecture/control-plane-node-communication/", ["06-architecture", "32-api-security"], "part"],
+    ["Controllers", "architecture/controller/", ["06-architecture"], "full"],
+    ["Leases", "architecture/leases/", ["37-internals"], "full"],
+    ["Cloud Controller Manager", "architecture/cloud-controller/", ["06-architecture"], "part"],
+    ["About cgroup v2", "architecture/cgroups/", ["02-evolution", "07-cri"], "part"],
+    ["Kubernetes Self-Healing", "architecture/self-healing/", ["06-architecture", "21-final-demo"], "full"],
+    ["Garbage Collection", "architecture/garbage-collection/", ["23-objects", "35-lifecycle"], "full"],
+    ["Mixed Version Proxy", "architecture/mixed-version-proxy/", [], "gap"]
+  ]],
+  ["Containers", [
+    ["Images", "containers/images/", ["25-containers", "02-evolution"], "full"],
+    ["Container Environment", "containers/container-environment/", ["25-containers"], "full"],
+    ["Runtime Class", "containers/runtime-class/", ["07-cri"], "full"],
+    ["Container Lifecycle Hooks", "containers/container-lifecycle-hooks/", ["25-containers"], "full"],
+    ["Container Runtime Interface (CRI)", "containers/cri/", ["07-cri"], "full"]
+  ]],
+  ["Workloads: Pods", [
+    ["Pod Lifecycle", "workloads/pods/pod-lifecycle/", ["13-pods"], "full"],
+    ["Init Containers", "workloads/pods/init-containers/", ["13-pods"], "full"],
+    ["Sidecar Containers", "workloads/pods/sidecar-containers/", ["13-pods"], "full"],
+    ["Ephemeral Containers", "workloads/pods/ephemeral-containers/", ["25-containers", "36-debugging"], "full"],
+    ["Disruptions", "workloads/pods/disruptions/", ["27-disruptions"], "full"],
+    ["Pod Quality of Service Classes", "workloads/pods/pod-qos/", ["13-pods"], "full"],
+    ["Static Pods", "workloads/pods/static-pods/", ["25-containers", "06-architecture"], "full"],
+    ["User Namespaces", "workloads/pods/user-namespaces/", ["31-pod-security"], "full"],
+    ["Downward API", "workloads/pods/downward-api/", ["25-containers"], "full"],
+    ["Pod Hostname, Scheduling Group, Advanced Pod Configuration", "workloads/pods/", ["13-pods"], "part"]
+  ]],
+  ["Workloads: Management & Autoscaling", [
+    ["Deployments", "workloads/controllers/deployment/", ["15-deployments"], "full"],
+    ["ReplicaSet", "workloads/controllers/replicaset/", ["15-deployments"], "full"],
+    ["StatefulSets", "workloads/controllers/statefulset/", ["17-ds-sts"], "full"],
+    ["DaemonSet", "workloads/controllers/daemonset/", ["17-ds-sts"], "full"],
+    ["Jobs", "workloads/controllers/job/", ["24-jobs"], "full"],
+    ["Automatic Cleanup for Finished Jobs", "workloads/controllers/ttlafterfinished/", ["24-jobs"], "full"],
+    ["CronJob", "workloads/controllers/cron-jobs/", ["24-jobs"], "full"],
+    ["ReplicationController", "workloads/controllers/replicationcontroller/", ["15-deployments"], "part"],
+    ["Managing Workloads", "workloads/management/", ["15-deployments", "23-objects"], "full"],
+    ["Autoscaling Workloads, HPA, VPA", "workloads/autoscaling/", ["26-autoscaling"], "full"],
+    ["Workload API, PodGroup, CompositePodGroup (gang scheduling)", "workloads/", [], "gap"]
+  ]],
+  ["Services, Load Balancing, and Networking", [
+    ["Service", "services-networking/service/", ["18-services", "10-kube-proxy"], "full"],
+    ["Ingress", "services-networking/ingress/", ["18-services"], "full"],
+    ["Ingress Controllers", "services-networking/ingress-controllers/", ["18-services"], "full"],
+    ["Gateway API", "services-networking/gateway/", ["20-gateway"], "full"],
+    ["EndpointSlices", "services-networking/endpoint-slices/", ["29-svc-advanced"], "full"],
+    ["Network Policies", "services-networking/network-policies/", ["28-netpol"], "full"],
+    ["DNS for Services and Pods", "services-networking/dns-pod-service/", ["11-coredns"], "full"],
+    ["IPv4/IPv6 dual-stack", "services-networking/dual-stack/", ["29-svc-advanced"], "full"],
+    ["Topology Aware Routing", "services-networking/topology-aware-routing/", ["29-svc-advanced"], "full"],
+    ["Networking on Windows", "services-networking/windows-networking/", [], "gap"],
+    ["Service ClusterIP allocation", "services-networking/cluster-ip-allocation/", ["29-svc-advanced"], "full"],
+    ["Service Internal Traffic Policy", "services-networking/service-traffic-policy/", ["29-svc-advanced"], "full"]
+  ]],
+  ["Storage", [
+    ["Volumes", "storage/volumes/", ["19-volumes", "09-csi"], "full"],
+    ["Persistent Volumes", "storage/persistent-volumes/", ["19-volumes"], "full"],
+    ["Projected Volumes", "storage/projected-volumes/", ["30-storage-advanced"], "full"],
+    ["Ephemeral Volumes", "storage/ephemeral-volumes/", ["30-storage-advanced"], "full"],
+    ["Storage Classes", "storage/storage-classes/", ["19-volumes"], "full"],
+    ["Volume Attributes Classes", "storage/volume-attributes-classes/", ["30-storage-advanced"], "full"],
+    ["Dynamic Volume Provisioning", "storage/dynamic-provisioning/", ["19-volumes", "09-csi"], "full"],
+    ["Volume Snapshots & Snapshot Classes", "storage/volume-snapshots/", ["30-storage-advanced"], "full"],
+    ["CSI Volume Cloning", "storage/volume-pvc-datasource/", ["30-storage-advanced"], "full"],
+    ["Volume Populators and Data Sources", "storage/volume-populators-and-data-sources/", ["30-storage-advanced"], "part"],
+    ["Storage Capacity", "storage/storage-capacity/", ["30-storage-advanced"], "part"],
+    ["Node-specific Volume Limits", "storage/storage-limits/", ["30-storage-advanced"], "part"],
+    ["Local ephemeral storage", "storage/ephemeral-storage/", ["30-storage-advanced"], "full"],
+    ["Volume Health Monitoring", "storage/volume-health-monitoring/", ["30-storage-advanced"], "part"],
+    ["Windows Storage", "storage/windows-storage/", [], "gap"]
+  ]],
+  ["Configuration", [
+    ["ConfigMaps", "configuration/configmap/", ["16-config"], "full"],
+    ["Secrets", "configuration/secret/", ["16-config", "32-api-security"], "full"],
+    ["Liveness, Readiness, and Startup Probes", "workloads/pods/pod-lifecycle/#container-probes", ["13-pods"], "full"],
+    ["Resource Management for Pods and Containers", "configuration/manage-resources-containers/", ["13-pods", "14-scheduler", "30-storage-advanced"], "full"],
+    ["Organizing Cluster Access Using kubeconfig Files", "configuration/organize-cluster-access-kubeconfig/", ["05-yaml"], "full"],
+    ["Resource Management for Windows nodes", "configuration/windows-resource-management/", [], "gap"]
+  ]],
+  ["Security", [
+    ["Cloud Native Security", "security/cloud-native-security/", ["32-api-security"], "part"],
+    ["Pod Security Standards", "security/pod-security-standards/", ["31-pod-security"], "full"],
+    ["Pod Security Admission", "security/pod-security-admission/", ["31-pod-security"], "full"],
+    ["Service Accounts", "security/service-accounts/", ["12-rbac"], "full"],
+    ["Pod Security Policies (removed)", "security/pod-security-policy/", ["31-pod-security"], "full"],
+    ["Security For Linux Nodes", "security/linux-security/", ["31-pod-security"], "part"],
+    ["Security For Windows Nodes", "security/windows-security/", [], "gap"],
+    ["Controlling Access to the Kubernetes API", "security/controlling-access/", ["32-api-security", "12-rbac", "01-bootstrap"], "full"],
+    ["Role Based Access Control Good Practices", "security/rbac-good-practices/", ["12-rbac", "32-api-security"], "full"],
+    ["Good practices for Kubernetes Secrets", "security/secrets-good-practices/", ["32-api-security", "16-config"], "full"],
+    ["Multi-tenancy", "security/multi-tenancy/", ["32-api-security"], "part"],
+    ["Hardening Guide", "security/hardening-guide/authentication-mechanisms/", ["32-api-security"], "part"],
+    ["Kubernetes API Server Bypass Risks", "security/api-server-bypass-risks/", ["32-api-security"], "full"],
+    ["Linux kernel security constraints", "security/linux-kernel-security-constraints/", ["31-pod-security"], "full"],
+    ["Security Checklist & Application Security Checklist", "security/security-checklist/", ["32-api-security"], "full"]
+  ]],
+  ["Policies", [
+    ["Limit Ranges", "policy/limit-range/", ["14-scheduler"], "full"],
+    ["Resource Quotas", "policy/resource-quotas/", ["14-scheduler"], "full"],
+    ["Process ID Limits And Reservations", "policy/pid-limiting/", ["27-disruptions"], "part"]
+  ]],
+  ["Scheduling, Preemption and Eviction", [
+    ["Kubernetes Scheduler", "scheduling-eviction/kube-scheduler/", ["14-scheduler"], "full"],
+    ["Running multiple schedulers", "scheduling-eviction/", ["37-internals"], "full"],
+    ["Assigning Pods to Nodes", "scheduling-eviction/assign-pod-node/", ["14-scheduler"], "full"],
+    ["Pod Overhead", "scheduling-eviction/pod-overhead/", [], "gap"],
+    ["Pod Scheduling Readiness", "scheduling-eviction/pod-scheduling-readiness/", ["14-scheduler"], "full"],
+    ["Pod Topology Spread Constraints", "scheduling-eviction/topology-spread-constraints/", ["14-scheduler"], "full"],
+    ["Taints and Tolerations", "scheduling-eviction/taint-and-toleration/", ["14-scheduler"], "full"],
+    ["Scheduling Framework", "scheduling-eviction/scheduling-framework/", ["37-internals"], "full"],
+    ["Scheduler Performance Tuning & Resource Bin Packing", "scheduling-eviction/resource-bin-packing/", ["37-internals"], "part"],
+    ["Pod Priority and Preemption", "scheduling-eviction/pod-priority-preemption/", ["14-scheduler"], "full"],
+    ["Node-pressure Eviction", "scheduling-eviction/node-pressure-eviction/", ["27-disruptions"], "full"],
+    ["API-initiated Eviction", "scheduling-eviction/api-eviction/", ["27-disruptions"], "full"],
+    ["Gang Scheduling, PodGroup Scheduling, Workload-Aware Preemption", "scheduling-eviction/", [], "gap"],
+    ["Node Declared Features", "scheduling-eviction/", [], "gap"]
+  ]],
+  ["Resource Management (devices)", [
+    ["Resource managers (CPU, memory, topology)", "policy/node-resource-managers/", [], "gap"],
+    ["Dynamic Resource Allocation", "scheduling-eviction/dynamic-resource-allocation/", ["34-dra"], "full"],
+    ["Device Plugins", "extend-kubernetes/compute-storage-net/device-plugins/", ["34-dra"], "full"]
+  ]],
+  ["Cluster Administration", [
+    ["Node Shutdowns", "cluster-administration/node-shutdown/", ["27-disruptions"], "full"],
+    ["Swap memory management", "cluster-administration/swap-memory-management/", ["35-lifecycle"], "part"],
+    ["Node Autoscaling", "cluster-administration/node-autoscaling/", ["26-autoscaling"], "full"],
+    ["Certificates", "cluster-administration/certificates/", ["35-lifecycle", "01-bootstrap"], "full"],
+    ["Cluster Networking", "cluster-administration/networking/", ["08-cni"], "full"],
+    ["Observability, Logging Architecture, System Logs", "cluster-administration/logging/", ["36-debugging"], "full"],
+    ["Metrics For System Components & Object States", "cluster-administration/system-metrics/", ["22-monitoring"], "full"],
+    ["Traces For Kubernetes System Components", "cluster-administration/system-traces/", ["36-debugging"], "part"],
+    ["Admission Webhook Good Practices", "cluster-administration/admission-webhooks-good-practices/", ["33-extending"], "full"],
+    ["Compatibility Version For Control Plane Components", "cluster-administration/compatibility-version/", ["35-lifecycle"], "part"],
+    ["Proxies in Kubernetes", "cluster-administration/proxies/", ["10-kube-proxy"], "part"],
+    ["API Priority and Fairness", "cluster-administration/flow-control/", ["37-internals"], "full"],
+    ["Installing Addons", "cluster-administration/addons/", ["08-cni", "11-coredns"], "part"],
+    ["Coordinated Leader Election", "cluster-administration/coordinated-leader-election/", ["37-internals"], "full"]
+  ]],
+  ["Windows in Kubernetes", [
+    ["Windows containers in Kubernetes", "windows/intro/", [], "gap"],
+    ["Guide for Running Windows Containers", "windows/user-guide/", [], "gap"]
+  ]],
+  ["Extending Kubernetes", [
+    ["Network Plugins", "extend-kubernetes/compute-storage-net/network-plugins/", ["08-cni"], "full"],
+    ["Custom Resources", "extend-kubernetes/api-extension/custom-resources/", ["33-extending"], "full"],
+    ["Kubernetes API Aggregation Layer", "extend-kubernetes/api-extension/apiserver-aggregation/", ["33-extending"], "full"],
+    ["Operator pattern", "extend-kubernetes/operator/", ["33-extending", "19-volumes"], "full"]
+  ]]
+];
+
+const topics = Object.fromEntries((window.K8S_TOPICS || []).map(t => [t.id, t]));
+const $ = s => document.querySelector(s);
+const state = { q: "", gaps: false };
+function render() {
+  let full = 0, part = 0, gap = 0;
+  MAP.forEach(([, rows]) => rows.forEach(r => { if (r[3] === "full") full++; else if (r[3] === "part") part++; else gap++; }));
+  const total = full + part + gap;
+  $("#sCov").textContent = `${full}/${total}`; $("#sPart").textContent = part; $("#sGap").textContent = gap;
+  setTimeout(() => $("#sBar").style.width = ((full + part * .5) / total * 100) + "%", 200);
+  $("#map").innerHTML = MAP.map(([sec, rows]) => {
+    const vis = rows.filter(r => (!state.gaps || r[3] !== "full") && (!state.q || (r[0] + " " + r[2].map(id => topics[id]?.title || "").join(" ")).toLowerCase().includes(state.q)));
+    if (!vis.length) return "";
+    const f = rows.filter(r => r[3] === "full").length;
+    return `<section class="sec glass reveal"><div class="sec-h"><h2>${sec}</h2><span class="chip ${f === rows.length ? "green" : "blue"}">${f}/${rows.length} covered</span></div><div class="rows">${vis.map(r => {
+      const chip = r[3] === "full" ? '<span class="chip green">covered</span>' : r[3] === "part" ? '<span class="chip amber">partly</span>' : '<span class="chip red">gap</span>';
+      const links = r[2].filter(id => topics[id]).map(id => `<a class="btn small" href="${topics[id].file}">${id.split("-")[0]} · ${topics[id].title.split(":")[0].slice(0, 34)}</a>`).join("");
+      return `<div class="row"><span>${chip} ${r[0]}</span><span class="links">${links}<a class="btn small" target="_blank" rel="noopener" href="https://kubernetes.io/docs/concepts/${r[1]}">📘 docs</a></span></div>`;
+    }).join("")}</div></section>`;
+  }).join("");
+  document.querySelectorAll(".sec-h").forEach(h => h.onclick = () => h.parentElement.classList.toggle("closed"));
+  K8S.initReveal();
+}
+$("#q").oninput = e => { state.q = e.target.value.trim().toLowerCase(); render(); };
+$("#gaps").onchange = e => { state.gaps = e.target.checked; render(); };
+render(); K8S.initProgressBar(); K8S.initReveal();
+</script>
+</body>
+</html>

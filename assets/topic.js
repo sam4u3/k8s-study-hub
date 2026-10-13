@@ -298,6 +298,9 @@
     const toc = secs.map((s, i) => `<a data-spy href="#${s.id}"><span class="num">${i + 1}</span>${s.toc || s.title}</a>`).join("");
     const vid = P.video != null ? `<a class="btn small" target="_blank" rel="noopener" href="${VIDEO}&t=${P.video}s">▶ Course chapter${P.videoLabel ? " · " + P.videoLabel : ""}</a>` : "";
     const repo = P.repo ? `<a class="btn small" target="_blank" rel="noopener" href="${REPO}/tree/main/${P.repo}">📁 Course manifests: ${P.repo}</a>` : "";
+    // Official docs links: page data wins, else the registry entry for this topic.
+    const reg = (window.K8S_TOPICS || []).find(t => t.id === P.id) || {};
+    const docs = (P.docs || reg.docs || []).map(([label, path]) => `<a class="btn small" target="_blank" rel="noopener" href="${path.startsWith("http") ? path : "https://kubernetes.io/docs/" + path}">📘 ${label}</a>`).join("");
     let body = "";
     secs.forEach((s, i) => {
       body += `<section class="topic" id="${s.id}"><div class="sec-head reveal"><div class="sec-num">${i + 1}</div><h2>${s.title}</h2></div>
@@ -313,7 +316,7 @@
             <div class="chips"><span class="chip blue">${g.icon} ${g.title}</span>${P.minutes ? `<span class="chip">≈ ${P.minutes} min</span>` : ""}<span class="chip violet" id="doneChip" style="display:none">✓ Completed</span></div>
             <h1>${P.title}</h1><p>${P.lead}</p>
             ${P.parts ? `<div class="parts">${P.parts.map((p, i) => `<div class="part"><b>${i + 1} · ${p[0]}</b>${p[1]}</div>`).join("")}</div>` : ""}
-            <div class="ref">${vid}${repo}</div>
+            <div class="ref">${vid}${repo}${docs}</div>
           </div>
           ${body}
         </main>
