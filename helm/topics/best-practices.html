@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chart Best Practices</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .rv { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .rv .opts { display: grid; gap: 8px; font-size: 13px; min-width: 0; }
+  .rv .opts label { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+  .rv .opts code { overflow-wrap: anywhere; }
+  .rv .res { min-width: 0; }
+  .score-ring { font: 800 34px var(--sans); }
+  .finding { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 6px; font-size: 13px; }
+  .finding.bad { border-color: rgba(248,113,113,.6); }
+  .finding.ok { border-color: rgba(52,211,153,.5); }
+  @media (max-width: 700px) { .rv { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Chart reviewer: each statement describes the chart; wrong choices are flagged with the rule from the best-practice guide.
+const RULES = [
+  ["Chart is named <code>My_WebApp</code>", false, "Chart names: lowercase letters, numbers and dashes only (DNS-1123 label). Use <code>my-webapp</code>.", "conventions"],
+  ["values use camelCase starting lowercase (<code>serverPort</code>)", true, "Values: start lowercase, camelCase. Capitalised names clash with built-ins like .Release.", "values"],
+  ["every key in values.yaml has a comment starting with its name", true, "Document every value; begin the comment with the key name so tools can extract it.", "values"],
+  ["templates set <code>metadata.namespace: prod</code>", false, "Don't hard-code namespace in templates; let <code>--namespace</code> decide.", "conventions"],
+  ["helpers are named <code>fullname</code> and <code>labels</code>", false, "Named templates are global across subcharts. Prefix them: <code>web.fullname</code>.", "templates"],
+  ["one resource per file, named after its kind (<code>web-service.yaml</code>)", true, "Each resource in its own file; dashed names that reflect the kind.", "templates"],
+  ["image uses tag <code>latest</code>", false, "Use a fixed tag or a digest. <code>latest</code> makes releases unreproducible.", "pods"],
+  ["Pods carry <code>app.kubernetes.io/name</code>, <code>instance</code>, <code>managed-by</code> and <code>helm.sh/chart</code> labels", true, "Standard labels let tools find everything a release manages.", "labels"],
+  ["<code>rbac.create</code> defaults to true and <code>serviceAccount.name</code> is configurable", true, "RBAC and ServiceAccount under separate keys; create RBAC by default.", "rbac"],
+  ["CRDs and resources using them are in the same templates/ folder", false, "A CRD must exist before resources of that kind. Put CRDs in <code>crds/</code> or a separate chart.", "crds"],
+  ["string values are piped through <code>quote</code>", true, "Quote strings; YAML would turn <code>1.10</code> into 1.1 and <code>yes</code> into true.", "templates"],
+  ["deeply nested values with no existence checks", false, "Prefer flat values. Each level of nesting needs a check, or users hit nil-pointer errors.", "values"]
+];
+const rHtml = `
+<div class="sim glass rv">
+  <div class="opts">${RULES.map((r, i) => `<label><input type="checkbox" data-r="${i}"> <span>${r[0]}</span></label>`).join("")}</div>
+  <div class="res"><div class="score-ring" id="rvScore"></div><div class="muted" style="font-size:13px;margin-bottom:10px">Tick what's true of your chart. Good practices add points; bad ones are flagged.</div><div id="rvList"></div></div>
+</div>`;
+function initReview(el) {
+  const boxes = [...el.querySelectorAll("[data-r]")];
+  // Start with a few typical mistakes ticked.
+  [0, 4, 6, 7].forEach(i => boxes[i].checked = true);
+  const draw = () => {
+    let good = 0, total = RULES.filter(r => r[1]).length;
+    const out = [];
+    boxes.forEach((b, i) => {
+      const [, isGood, why, area] = RULES[i];
+      if (b.checked && isGood) good++;
+      if (b.checked && !isGood) out.push(`<div class="finding bad">✗ <b>${area}</b>: ${why}</div>`);
+      if (!b.checked && isGood) out.push(`<div class="finding">○ <b>${area}</b>: ${why}</div>`);
+    });
+    const bad = boxes.filter((b, i) => b.checked && !RULES[i][1]).length;
+    const score = Math.max(0, Math.round((good / total) * 100) - bad * 15);
+    el.querySelector("#rvScore").innerHTML = `<span style="color:${score >= 80 ? "var(--green)" : score >= 50 ? "var(--amber)" : "var(--red)"}">${score}</span><span class="muted" style="font-size:16px"> / 100</span>`;
+    el.querySelector("#rvList").innerHTML = out.join("") || '<div class="finding ok">✓ Nothing to flag. Ship it, after helm lint --strict.</div>';
+  };
+  boxes.forEach(b => b.onchange = draw);
+  draw();
+}
+
+K8S_RENDER({
+  id: "helm-practices", group: "practices", minutes: 20,
+  title: 'Chart <span class="grad-text">best practices</span>',
+  lead: "The Helm project's guide for chart authors, condensed: how to name things, design values, structure templates, label resources and handle CRDs, RBAC and images.",
+  parts: [["Chart reviewer", "Score a chart"], ["Values", "Naming, flat vs nested"], ["Templates", "Structure and naming"], ["Labels, Pods, RBAC", "Operational conventions"]],
+  sections: [
+    { id: "review", title: "Review a chart", toc: "Chart reviewer",
+      blocks: [{ type: "custom", html: rHtml, init: initReview }] },
+    { id: "values", title: "Designing values", toc: "Values",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Flat (preferred)", chip: "easy to override", chipClass: "green", color: "var(--green)", items: ["<code>serverName: nginx</code><br><code>serverPort: 80</code>", "<code>--set serverPort=8080</code>", "One existence check per value"] },
+          { title: "Nested", chip: "use when it groups many related keys", chipClass: "amber", color: "var(--amber)", items: ["<code>server:<br>&nbsp;&nbsp;name: nginx<br>&nbsp;&nbsp;port: 80</code>", "<code>--set server.port=8080</code>", "Templates must check each level: <code>if .Values.server</code> then <code>.Values.server.port</code>"] }
+        ] },
+        { type: "cards", cols: 3, items: [
+          ["🔤", "camelCase", "Start lowercase, no dashes or underscores: <code>serviceAccountName</code>."],
+          ["🗺️", "Maps over lists", "Users can override <code>servers.foo.port</code> with --set; list items need indexes like <code>servers[0].port</code>."],
+          ["📝", "Document", "<code># serverPort is the HTTP listener port</code> above each key."]
+        ] },
+        { type: "callout", kind: "tip", html: "Make types obvious: quote strings in values.yaml, and store large integers as strings, converting with <code>{{ int $value }}</code> in the template, to avoid scientific notation." }
+      ] },
+    { id: "templates", title: "Template structure", toc: "Templates",
+      blocks: [
+        { type: "table", head: ["Rule", "Example"], rows: [
+          ["<code>.yaml</code> for templates that output YAML; <code>.tpl</code> for helpers", "<code>deployment.yaml</code>, <code>_helpers.tpl</code>"],
+          ["Dashed file names, one resource per file, named after the kind", "<code>web-deployment.yaml</code>, <code>web-service.yaml</code>"],
+          ["Namespace every <code>define</code> with the chart name", "<code>{{ define \"web.fullname\" }}</code>"],
+          ["Spaces inside braces, two-space indent, no tabs", "<code>{{ .Values.foo }}</code>, not <code>{{.Values.foo}}</code>"],
+          ["Chomp whitespace so output has no blank-line gaps", "<code>{{- if .Values.x }}</code>"],
+          ["Template comments for template notes; YAML comments only when users should see them in output", "<code>{{- /* explains the block */}}</code>"],
+          ["Start new charts with <code>helm create</code>", "It already follows these conventions"]
+        ] }
+      ] },
+    { id: "ops", title: "Labels, Pods, RBAC and CRDs", toc: "Labels, Pods, RBAC",
+      blocks: [
+        { type: "code", title: "standard labels (in _helpers.tpl)", code: `{{- define "web.labels" -}}
+app.kubernetes.io/name: {{ include "web.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+{{- end }}` },
+        { type: "cards", cols: 3, items: [
+          ["🏷️", "Label or annotation?", "Label it only if you'll select or query by it. Everything else is an annotation."],
+          ["🖼️", "Images", "Fixed tag or digest. Default <code>imagePullPolicy: IfNotPresent</code> from values. PodTemplates must declare selectors."],
+          ["🔐", "RBAC", "<code>rbac.create: true</code> by default; <code>serviceAccount.create</code> and <code>serviceAccount.name</code> as separate keys."]
+        ] },
+        { type: "compare", cols: [
+          { title: "CRDs in crds/", chip: "simple", chipClass: "blue", color: "var(--k8s-2)", items: ["Installed before templates on first install", "Never upgraded or deleted by Helm", "Good for CRDs that rarely change"] },
+          { title: "CRDs in their own chart", chip: "full control", chipClass: "green", color: "var(--green)", items: ["Install the CRD chart first, then the app chart", "CRDs are normal templates, so upgrades work", "Common for operators"] }
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🔡", "Names", "Chart: lowercase-dashes. Values: camelCase."],
+      ["📝", "Document values", "Comment starts with the key name."],
+      ["🧩", "Namespace defines", "web.fullname, not fullname."],
+      ["🏷️", "Standard labels", "name, instance, version, managed-by, helm.sh/chart."],
+      ["📌", "Pin images", "No latest; digest if you can."],
+      ["🧱", "CRD strategy", "crds/ for simple, separate chart for full lifecycle."]
+    ],
+    cheat: `helm create web                       # conventional skeleton
+helm lint ./web --strict
+helm template web ./web | kubeconform -strict -summary   # schema-check output (external tool)
+helm show values ./web                 # read your own docs as users will`,
+    quiz: [
+      ["Which chart name is valid?", ["My_App", "my-app", "myApp", "my.app"], 1, "DNS-1123: lowercase letters, numbers, dashes."],
+      ["Where should a template get its namespace?", ["metadata.namespace in every file", "--namespace at install time", "values.namespace", "Chart.yaml"], 1, "Avoid hard-coding namespace in templates."],
+      ["Why prefix named templates with the chart name?", ["Speed", "Names are global across subcharts", "Required by Go", "For Artifact Hub"], 1, "Two charts defining \"labels\" would collide."],
+      ["When should metadata be a label rather than an annotation?", ["Always", "When you query or select by it", "When it's long", "Never"], 1, "Otherwise use an annotation."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

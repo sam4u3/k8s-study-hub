@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Repositories & OCI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// OCI reference builder: helm push takes the namespace only; pull/install add the chart name and a version or digest.
+const oHtml = `
+<div class="sim glass">
+  <div class="sim-row" style="flex-wrap:wrap">
+    <label>Registry login<input class="input" id="oLogin" value="ghcr.io" style="font-family:var(--mono)"></label>
+    <label>Push target (after oci://)<input class="input" id="oNs" value="ghcr.io/example/charts" style="font-family:var(--mono)"></label>
+    <label>Chart name (Chart.yaml)<input class="input" id="oName" value="web" style="font-family:var(--mono)"></label>
+    <label>Chart version<input class="input" id="oVer" value="1.4.0" style="font-family:var(--mono)"></label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="oDig"> install by digest</label>
+  </div>
+  <div class="code"><div class="code-head"><span>commands</span><button class="copy">Copy</button></div><pre id="oCmd"></pre></div>
+  <div class="pipe-out" id="oOut"></div>
+</div>`;
+function initOci(el) {
+  const $ = s => el.querySelector(s);
+  const DIGEST = "sha256:52ccaee6d4dd272e54bfccda77738b42e1edf0e4a20c27e23f0b6c15d01aef79";
+  const draw = () => {
+    const login = $("#oLogin").value.trim(), ns = $("#oNs").value.trim().replace(/^oci:\/\//, "").replace(/\/$/, ""), name = $("#oName").value.trim(), ver = $("#oVer").value.trim();
+    const errs = [];
+    if (/^https?:\/\//.test(login) || login.includes("/")) errs.push("Helm 4: <code>helm registry login</code> takes the domain only, e.g. <code>ghcr.io</code>, not a URL or path.");
+    if (ns.split("/").pop() === name) errs.push(`The push target must not end with the chart name: Helm adds <code>/${name}</code> itself, so this would push to <code>${ns}/${name}</code>.`);
+    if (/:[^/]+$/.test(ns.split("/").slice(1).join("/"))) errs.push("The push target must not contain a tag; the tag comes from the chart version.");
+    if (!/^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)*$/.test(ver)) errs.push("Chart versions must be SemVer 2, e.g. 1.4.0.");
+    const tag = ver.replace(/\+/g, "_");
+    const ref = `oci://${ns}/${name}`;
+    $("#oCmd").innerHTML = K8S_HL(`helm registry login ${login} -u <user> --password-stdin
+helm package ./${name}                      # → ${name}-${ver}.tgz
+helm push ${name}-${ver}.tgz oci://${ns}
+# Pushed: ${ns}/${name}:${tag}
+helm show values ${ref} --version ${ver}
+helm install ${name} ${$("#oDig").checked ? `${ref}@${DIGEST}` : `${ref} --version ${ver}`}`);
+    $("#oOut").innerHTML = errs.length ? errs.map(e => `<span style="color:var(--red)">✗ ${e}</span>`).join("<br>")
+      : `<span style="color:var(--green)">✓ Valid. The registry repository is <code>${ns}/${name}</code> and the tag is <code>${tag}</code>${tag !== ver ? " (OCI tags can't contain +, so Helm stores it as _)" : ""}.${$("#oDig").checked ? " Installing by digest is immutable: if the content changes, Helm refuses it." : ""}</span>`;
+    K8S.initCopy(el);
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = i.onchange = draw);
+  draw();
+}
+
+K8S_RENDER({
+  id: "helm-registries", group: "distribution", minutes: 20,
+  title: 'Repositories, <span class="grad-text">OCI registries</span> & signing',
+  lead: "Charts are shared in two ways: classic chart repositories (an HTTP server with an index.yaml) and OCI registries, the same registries that hold container images. Provenance files let users check a chart wasn't tampered with.",
+  parts: [["Two ways to share", "HTTP repo vs OCI"], ["OCI workflow", "login, push, install"], ["Classic repositories", "index.yaml, GitHub Pages"], ["Provenance", "Sign and verify"]],
+  sections: [
+    { id: "compare", title: "Two ways to share charts", toc: "Two ways to share",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Chart repository", chip: "HTTP + index.yaml", chipClass: "blue", color: "var(--k8s-2)", items: ["Any static web server: GitHub Pages, S3, GCS, ChartMuseum", "Clients run <code>helm repo add</code> and <code>helm repo update</code>", "Install as <code>repo/chart</code>", "The whole index downloads on every update; big repos get slow"] },
+          { title: "OCI registry", chip: "recommended", chipClass: "green", color: "var(--green)", items: ["Same registry as your images: GHCR, ECR, ACR, Artifact Registry, Harbor, Docker Hub", "No <code>repo add</code>: use <code>oci://</code> references directly", "Registry auth, replication and retention you already have", "Pin by immutable digest"] }
+        ] }
+      ] },
+    { id: "oci", title: "OCI workflow", toc: "OCI workflow",
+      lead: "<code>helm push</code> takes the namespace without the chart name or tag. Commands that download a chart add the chart name. Try a wrong push target:",
+      blocks: [{ type: "custom", html: oHtml, init: initOci },
+        { type: "table", head: ["Subcommand", "OCI support"], rows: [
+          ["<code>helm registry login / logout</code>", "Store credentials in Helm's registry config (<code>helm env HELM_REGISTRY_CONFIG</code>)"],
+          ["<code>helm push</code>", "Upload a packaged .tgz; a .prov file next to it is pushed too"],
+          ["<code>helm pull</code>, <code>show</code>, <code>template</code>, <code>install</code>, <code>upgrade</code>", "Take <code>oci://host/path/chart</code> plus <code>--version</code> or <code>@sha256:…</code>"],
+          ["Dependencies", "<code>repository: oci://host/path</code> in Chart.yaml (no chart name)"],
+          ["<code>helm search</code>, <code>helm repo</code>", "Not used with OCI: browse the registry or Artifact Hub instead"]
+        ] }] },
+    { id: "repo", title: "Classic chart repositories", toc: "Classic repositories",
+      blocks: [
+        { type: "yaml", title: "index.yaml (served at the repository URL)", lines: [
+          ["apiVersion: v1"],
+          ["entries:", "One key per chart name, with every published version listed."],
+          ["  web:"],
+          ["  - name: web"],
+          ["    version: 1.4.0"],
+          ['    appVersion: "2.7.1"'],
+          ["    digest: 3e2b…", "SHA-256 of the .tgz; Helm checks it after download."],
+          ["    created: \"2026-10-01T09:00:00Z\""],
+          ["    urls:", "Where the package lives. Relative URLs resolve against the repository URL."],
+          ["    - https://example.github.io/charts/web-1.4.0.tgz"],
+          ["generated: \"2026-10-01T09:00:00Z\""]
+        ] },
+        { type: "steps", steps: [
+          { title: "Package charts into a folder", where: "your machine", why: "The folder becomes the website root.", code: `helm package ./web -d ./site` },
+          { title: "Build or update the index", where: "your machine", why: "<code>--merge</code> keeps entries for versions already published.", code: `helm repo index ./site --url https://example.github.io/charts --merge ./site/index.yaml` },
+          { title: "Publish", where: "hosting", whereClass: "green", why: "Upload <code>site/</code> to any static host. On GitHub, the <code>helm/chart-releaser-action</code> packages charts, creates GitHub releases and updates index.yaml on gh-pages for you." },
+          { title: "Use it", where: "users", whereClass: "amber", why: "Users add the URL once and refresh it before installing new versions.", code: `helm repo add example https://example.github.io/charts
+helm repo update
+helm install web example/web --version 1.4.0` }
+        ] }
+      ] },
+    { id: "prov", title: "Provenance and integrity", toc: "Provenance",
+      lead: "A provenance file (<code>web-1.4.0.tgz.prov</code>) holds the Chart.yaml and the package's SHA-256, signed with a PGP key. It proves who published the chart and that it hasn't changed.",
+      blocks: [
+        { type: "term", title: "sign and verify", lines: [
+          "$ helm package --sign --key 'Platform Team' --keyring ~/.gnupg/secring.gpg ./web",
+          "Successfully packaged chart and saved it to: web-1.4.0.tgz",
+          "$ ls",
+          "web-1.4.0.tgz  web-1.4.0.tgz.prov",
+          "$ helm verify web-1.4.0.tgz --keyring ~/.gnupg/pubring.gpg",
+          "Signed by: Platform Team <platform@example.com>",
+          "Using Key With Fingerprint: …",
+          "Chart Hash Verified: sha256:…",
+          "$ helm install web ./web-1.4.0.tgz --verify",
+          "✓ install refuses the chart if the signature or hash doesn't match"
+        ] },
+        { type: "cards", cols: 3, items: [
+          ["🔑", "GnuPG keyring", "Helm reads legacy keyrings. With GnuPG 2, export them: <code>gpg --export-secret-keys > ~/.gnupg/secring.gpg</code>."],
+          ["📌", "Digests", "For OCI, installing by <code>@sha256:</code> digest gives integrity without PGP; Helm 4's reproducible packages keep digests stable."],
+          ["✍️", "Sigstore", "Many registries sign charts with cosign as OCI artifacts. That's separate from Helm's built-in .prov files."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📦", "OCI first", "Push charts next to your images; no index to maintain."],
+      ["➡️", "push vs pull refs", "push: oci://host/path; install: oci://host/path/chart."],
+      ["🏷️", "Tag = version", "OCI tags come from the chart version (+ becomes _)."],
+      ["📌", "Digest installs", "Immutable references for supply-chain safety."],
+      ["🗂️", "index.yaml", "Classic repos are static sites; chart-releaser automates them."],
+      ["✍️", ".prov files", "PGP-signed hash; helm verify / --verify."]
+    ],
+    cheat: `helm registry login ghcr.io -u $USER --password-stdin
+helm package ./web && helm push web-1.4.0.tgz oci://ghcr.io/example/charts
+helm install web oci://ghcr.io/example/charts/web --version 1.4.0
+helm pull oci://ghcr.io/example/charts/web --version 1.4.0 --untar
+helm repo index ./site --url https://example.github.io/charts --merge ./site/index.yaml
+helm package --sign --key 'Platform Team' --keyring ~/.gnupg/secring.gpg ./web`,
+    quiz: [
+      ["Which push command is correct?", ["helm push web-1.4.0.tgz oci://ghcr.io/ex/charts", "helm push web-1.4.0.tgz oci://ghcr.io/ex/charts/web:1.4.0", "helm push ./web oci://ghcr.io/ex", "docker push web"], 0, "Helm infers the name and tag; push only takes packaged .tgz files."],
+      ["In Helm 4, which login works?", ["helm registry login https://ghcr.io", "helm registry login ghcr.io", "helm repo login ghcr.io", "helm login oci://ghcr.io"], 1, "Domain only."],
+      ["What does a .prov file contain?", ["The whole chart", "Chart.yaml and the package hash, PGP-signed", "The registry password", "An index.yaml"], 1, "helm verify checks both signature and hash."],
+      ["Chart version 1.0.0+build.5 is pushed to OCI. What's the tag?", ["1.0.0+build.5", "1.0.0_build.5", "1.0.0", "latest"], 1, "+ isn't allowed in OCI tags."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

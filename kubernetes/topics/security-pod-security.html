@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pod Security</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Pod Security Standards checker: toggle Pod settings, see which level it meets.
+const CHECKS = [
+  { k: "privileged", label: "privileged: true", lvl: "baseline", def: false },
+  { k: "hostNetwork", label: "hostNetwork / hostPID / hostIPC", lvl: "baseline", def: false },
+  { k: "hostPath", label: "hostPath volume", lvl: "baseline", def: false },
+  { k: "addCaps", label: "capabilities.add: [NET_ADMIN]", lvl: "baseline", def: false },
+  { k: "hostPort", label: "hostPort: 8080", lvl: "baseline", def: false },
+  { k: "root", label: "runAsNonRoot not set (may run as root)", lvl: "restricted", def: true },
+  { k: "escal", label: "allowPrivilegeEscalation not false", lvl: "restricted", def: true },
+  { k: "drop", label: "capabilities.drop missing ALL", lvl: "restricted", def: true },
+  { k: "seccomp", label: "seccompProfile not RuntimeDefault/Localhost", lvl: "restricted", def: true }
+];
+const pssHtml = `
+<div class="sim glass">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px" id="pssC"></div>
+  <div class="sim-row"><label>Namespace label pod-security.kubernetes.io/enforce=<select class="input" id="pssNs"><option>privileged</option><option selected>baseline</option><option>restricted</option></select></label></div>
+  <div class="pipe-out" id="pssOut"></div>
+</div>`;
+function initPss(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#pssC").style.gridTemplateColumns = "1fr";
+  const state = Object.fromEntries(CHECKS.map(c => [c.k, c.def]));
+  const go = () => {
+    $("#pssC").innerHTML = CHECKS.map(c => `<label class="box" style="display:flex;gap:8px;align-items:center;padding:7px 10px;cursor:pointer;font-size:13px"><input type="checkbox" data-k="${c.k}" ${state[c.k] ? "checked" : ""}> <span>${c.label} <span class="chip ${c.lvl === "baseline" ? "amber" : "violet"}" style="font-size:10px;padding:1px 6px">${c.lvl}</span></span></label>`).join("");
+    el.querySelectorAll("[data-k]").forEach(x => x.onchange = () => { state[x.dataset.k] = x.checked; go(); });
+    const bViol = CHECKS.filter(c => c.lvl === "baseline" && state[c.k]), rViol = CHECKS.filter(c => state[c.k]);
+    const meets = bViol.length ? "privileged" : rViol.length ? "baseline" : "restricted";
+    const ns = $("#pssNs").value, order = ["privileged", "baseline", "restricted"];
+    const ok = order.indexOf(meets) >= order.indexOf(ns);
+    const viol = ns === "privileged" ? [] : ns === "baseline" ? bViol : rViol;
+    $("#pssOut").innerHTML = `Pod meets: <b style="color:${meets === "restricted" ? "var(--green)" : meets === "baseline" ? "var(--amber)" : "var(--red)"}">${meets}</b><br>` +
+      (ok ? `<span style="color:var(--green)">✓ admitted in a namespace enforcing ${ns}</span>` : `<span style="color:var(--red)">✗ Error from server (Forbidden): pods "web" is forbidden: violates PodSecurity "${ns}:latest": ${viol.map(v => v.label).join(", ")}</span>`);
+  };
+  $("#pssNs").onchange = go; go();
+}
+
+K8S_RENDER({
+  id: "security-pod-security", group: "security", minutes: 30,
+  title: '<span class="grad-text">Pod Security</span>: standards, admission & securityContext',
+  lead: "A container is a Linux process. securityContext decides how much of the host kernel it can touch. Pod Security Admission enforces sane defaults per namespace, with no extra software.",
+  parts: [["Standards", "privileged, baseline, restricted"], ["Admission", "Namespace labels & modes"], ["securityContext", "Users, capabilities, filesystems"], ["Kernel controls", "seccomp, AppArmor, SELinux"], ["User namespaces", "Root inside, nobody outside"]],
+  sections: [
+    { id: "standards", title: "Pod Security Standards", toc: "Standards",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "privileged", chip: "unrestricted", chipClass: "red", color: "var(--red)", items: ["No restrictions", "For system components: CNI, CSI node plugins, monitoring agents", "Only in tightly controlled namespaces (kube-system)"] },
+          { title: "baseline", chip: "prevents known escalations", chipClass: "amber", color: "var(--amber)", items: ["No privileged, host namespaces, hostPath, hostPorts", "No added capabilities beyond a safe default set", "Most off-the-shelf apps run unchanged", "Good default for every app namespace"] },
+          { title: "restricted", chip: "hardened", chipClass: "green", color: "var(--green)", items: ["Everything in baseline, plus:", "<code>runAsNonRoot: true</code>, <code>allowPrivilegeEscalation: false</code>", "<code>capabilities.drop: [ALL]</code> (only NET_BIND_SERVICE may be added)", "<code>seccompProfile: RuntimeDefault</code>; restricted volume types"] }
+        ] },
+        { type: "h3", text: "Will my Pod be admitted?" },
+        { type: "custom", html: pssHtml, init: initPss }
+      ] },
+    { id: "admission", title: "Pod Security Admission", toc: "Admission",
+      lead: "Built into the API server (stable since v1.25), it replaced PodSecurityPolicy (removed in v1.25). Configure it with namespace labels.",
+      blocks: [
+        { type: "table", head: ["Mode", "On violation"], rows: [
+          ["<code>enforce</code>", "Pod rejected"],
+          ["<code>audit</code>", "Allowed; annotation added to the audit log event"],
+          ["<code>warn</code>", "Allowed; warning shown to the user (kubectl prints it)"]
+        ] },
+        { type: "code", title: "namespace labels", code: `apiVersion: v1
+kind: Namespace
+metadata:
+  name: gamehub
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.37
+    pod-security.kubernetes.io/warn: restricted      # show what would break under restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# dry-run a level change against existing Pods first:
+kubectl label --dry-run=server --overwrite ns gamehub pod-security.kubernetes.io/enforce=restricted` },
+        { type: "callout", kind: "info", html: "Enforcement checks <b>Pods</b>. A Deployment that produces violating Pods is created fine, but its ReplicaSet can't create Pods: look for <code>FailedCreate</code> events on the ReplicaSet. <code>warn</code> and <code>audit</code> also check workload templates, which surfaces problems earlier." }
+      ] },
+    { id: "context", title: "securityContext", toc: "securityContext",
+      blocks: [
+        { type: "yaml", title: "restricted-compliant Pod", lines: [
+          ["spec:", ""],
+          ["  securityContext:", "<b>Pod level</b>: applies to all containers unless overridden."],
+          ["    runAsNonRoot: true", "kubelet refuses to start a container whose user resolves to UID 0."],
+          ["    runAsUser: 10001", "Explicit UID (the image's USER is used otherwise)."],
+          ["    runAsGroup: 10001", ""],
+          ["    fsGroup: 10001", "Volumes are made group-writable for this GID. On big volumes set <code>fsGroupChangePolicy: OnRootMismatch</code> to avoid slow recursive chown."],
+          ["    seccompProfile: {type: RuntimeDefault}", "Container runtime's default syscall filter: blocks dozens of dangerous syscalls."],
+          ["  containers:", ""],
+          ["  - name: game-service", ""],
+          ["    image: ttl.sh/game-service:1h", ""],
+          ["    securityContext:", "<b>Container level</b>."],
+          ["      allowPrivilegeEscalation: false", "Sets no_new_privs: setuid binaries can't gain privileges."],
+          ["      readOnlyRootFilesystem: true", "Image filesystem read-only; mount an emptyDir for /tmp. Stops many exploit chains."],
+          ["      capabilities: {drop: [ALL]}", "Linux capabilities split root's power into ~40 pieces. Drop all; add back only what's needed (e.g. NET_BIND_SERVICE for ports &lt;1024)."],
+          ["    volumeMounts: [{name: tmp, mountPath: /tmp}]", ""],
+          ["  volumes: [{name: tmp, emptyDir: {}}]", ""]
+        ] }
+      ] },
+    { id: "kernel", title: "Kernel security modules", toc: "Kernel controls",
+      blocks: [
+        { type: "table", head: ["Control", "What it limits", "How to set"], rows: [
+          ["seccomp", "Which syscalls a process may make", "<code>securityContext.seccompProfile</code>: RuntimeDefault, Localhost (custom JSON on node), Unconfined"],
+          ["AppArmor", "File, network and capability access by path (Ubuntu/Debian)", "<code>securityContext.appArmorProfile</code> (stable since v1.31): RuntimeDefault or Localhost"],
+          ["SELinux", "Label-based mandatory access control (RHEL/Fedora)", "<code>securityContext.seLinuxOptions</code>; faster relabelling with SELinuxMount (stable v1.37)"],
+          ["Capabilities", "Pieces of root (NET_ADMIN, SYS_ADMIN…)", "<code>capabilities.add/drop</code>"],
+          ["procMount, sysctls", "/proc masking, kernel parameters", "Only 'safe' sysctls allowed by default"]
+        ] },
+        { type: "callout", kind: "tip", html: "Generate tight seccomp profiles automatically with the Security Profiles Operator, which records the syscalls your app actually uses." }
+      ] },
+    { id: "userns", title: "User namespaces", toc: "User namespaces",
+      lead: "Stable since v1.36. With <code>hostUsers: false</code> a container can run as root (UID 0) inside, while that UID maps to an unprivileged, unique UID range on the host. A container breakout lands as a nobody.",
+      blocks: [
+        { type: "code", title: "hostUsers: false", code: `apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy-root-app
+spec:
+  hostUsers: false          # new user namespace for this Pod
+  containers:
+  - name: app
+    image: some/legacy-image-that-needs-root
+# inside:  id → uid=0(root)
+# on node: ps -o uid,cmd → uid 1638400 (unprivileged range)` },
+        { type: "callout", kind: "info", html: "Requires Linux 6.3+ for idmap mounts on most filesystems and a runtime with user namespace support (containerd 2.0+, CRI-O 1.25+). Great for apps that insist on root, and for CI build Pods." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📏", "3 standards", "privileged < baseline < restricted."],
+      ["🏷️", "PSA via namespace labels", "enforce, audit, warn per namespace."],
+      ["🙅", "Non-root, no escalation", "runAsNonRoot, allowPrivilegeEscalation: false."],
+      ["✂️", "Drop ALL capabilities", "Add back only what you need."],
+      ["🛡️", "seccomp RuntimeDefault", "Required by restricted; cheap and effective."],
+      ["👤", "User namespaces GA", "hostUsers: false maps root to an unprivileged host UID."]
+    ],
+    cheat: `kubectl label ns <ns> pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+kubectl label --dry-run=server --overwrite ns <ns> pod-security.kubernetes.io/enforce=restricted
+kubectl get events -n <ns> --field-selector reason=FailedCreate
+kubectl exec <p> -- id
+kubectl get pod <p> -o jsonpath='{.spec.securityContext}{.spec.containers[*].securityContext}'`,
+    quiz: [
+      ["Which level forbids hostPath but still allows running as root?", ["privileged", "baseline", "restricted", "none"], 1, "restricted additionally requires runAsNonRoot."],
+      ["Deployment created, but no Pods appear in a restricted namespace. Where's the error?", ["kubectl logs", "FailedCreate events on the ReplicaSet", "etcd", "kube-proxy"], 1, "PSA rejects Pods, not Deployments."],
+      ["Which setting blocks setuid binaries from gaining privileges?", ["readOnlyRootFilesystem", "allowPrivilegeEscalation: false", "fsGroup", "runAsGroup"], 1, "It sets no_new_privs."],
+      ["What does hostUsers: false do?", ["Disables users", "Runs the Pod in its own user namespace with unprivileged host UIDs", "Removes ServiceAccount", "Enables hostNetwork"], 1, "Root inside ≠ root on the node."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

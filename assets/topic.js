@@ -254,7 +254,7 @@
     if (s.quiz) h += `<h3 class="sub reveal">Self-check quiz</h3><div class="score reveal" id="score"></div><div id="quiz">${s.quiz.map((q, i) => `<div class="quiz-q glass reveal" data-q="${i}"><h4>${i + 1}. ${q[0]}</h4><div class="opts">${q[1].map((o, j) => `<button class="opt" data-j="${j}">${o}</button>`).join("")}</div><div class="explain">💡 ${q[3]}</div></div>`).join("")}</div>`;
     h += `<div class="complete glass reveal"><h3 style="margin:0 0 6px">Finished this topic?</h3>
       <p class="muted" style="margin:0 0 16px">Marking it complete updates your dashboard progress (saved in this browser).</p>
-      <button class="btn primary" id="markDone">✓ Mark topic complete</button> <a class="btn" href="../index.html">Back to dashboard</a></div>`;
+      <button class="btn primary" id="markDone">✓ Mark topic complete</button> <a class="btn" href="../index.html">Back to ${(window.K8S_APP || { name: "Kubernetes" }).name} dashboard</a></div>`;
     h += `<div class="pager" id="pager"></div>`;
     return h;
   }
@@ -292,12 +292,13 @@
   /* ---------- Page ---------- */
   window.K8S_RENDER = function (P) {
     const g = (window.K8S_GROUPS || []).find(x => x.id === P.group) || { title: P.group, icon: "📘" };
+    const app = window.K8S_APP || { name: "Kubernetes", docsBase: "https://kubernetes.io/docs/" };
     document.title = document.title || P.title.replace(/<[^>]+>/g, "");
     const secs = P.sections.concat([{ id: "summary", title: "Summary", lead: P.summaryLead || "Key ideas, a cheat sheet and a quick self-check." }]);
     const toc = secs.map((s, i) => `<a data-spy href="#${s.id}"><span class="num">${i + 1}</span>${s.toc || s.title}</a>`).join("");
     // Official docs links: page data wins, else the registry entry for this topic.
     const reg = (window.K8S_TOPICS || []).find(t => t.id === P.id) || {};
-    const docs = (P.docs || reg.docs || []).map(([label, path]) => `<a class="btn small" target="_blank" rel="noopener" href="${path.startsWith("http") ? path : "https://kubernetes.io/docs/" + path}">📘 ${label}</a>`).join("");
+    const docs = (P.docs || reg.docs || []).map(([label, path]) => `<a class="btn small" target="_blank" rel="noopener" href="${path.startsWith("http") ? path : app.docsBase + path}">📘 ${label}</a>`).join("");
     let body = "";
     secs.forEach((s, i) => {
       body += `<section class="topic" id="${s.id}"><div class="sec-head reveal"><div class="sec-num">${i + 1}</div><h2>${s.title}</h2></div>
@@ -306,9 +307,9 @@
     document.getElementById("app").innerHTML = `
       <div class="progress-bar"></div><div class="blobs"><span></span><span></span><span></span></div>
       <div class="container layout">
-        <aside class="toc glass"><a class="back" href="../index.html">← Dashboard</a><nav>${toc}</nav></aside>
+        <aside class="toc glass"><a class="back" href="../../index.html">⌂ All apps</a><a class="back" href="../index.html">← ${app.name} dashboard</a><nav>${toc}</nav></aside>
         <main>
-          <a class="back mback" href="../index.html">← Dashboard</a>
+          <a class="back mback" href="../index.html">← ${app.name} dashboard</a>
           <div class="hero glass reveal">
             <div class="chips"><span class="chip blue">${g.icon} ${g.title}</span>${P.minutes ? `<span class="chip">≈ ${P.minutes} min</span>` : ""}<span class="chip violet" id="doneChip" style="display:none">✓ Completed</span></div>
             <h1>${P.title}</h1><p>${P.lead}</p>

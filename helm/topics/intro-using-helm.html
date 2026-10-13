@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Using Helm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .hist { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+  .hist th, .hist td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .hist tr.new td { animation: fadein .6s ease; }
+  @keyframes fadein { from { background: rgba(91,140,255,.25); } to { background: transparent; } }
+  .st-deployed { color: var(--green); } .st-failed { color: var(--red); } .st-superseded { color: var(--muted); } .st-uninstalled { color: var(--amber); }
+  .secrets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; font: 11px var(--mono); }
+  .secrets span { padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: rgba(255,255,255,.04); }
+  .setgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .setgrid pre { margin: 0; min-height: 120px; }
+  @media (max-width: 640px) { .setgrid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Release lifecycle simulator: revisions, statuses and the Secrets that store them.
+const rHtml = `
+<div class="sim glass">
+  <div class="ctrl" style="margin:0 0 10px;flex-wrap:wrap">
+    <button class="btn primary" id="rInstall">helm install web</button>
+    <button class="btn" id="rUp">helm upgrade (new chart version)</button>
+    <button class="btn" id="rBad">helm upgrade (broken image tag)</button>
+    <button class="btn" id="rRb">helm rollback web <b id="rbN">1</b></button>
+    <button class="btn small" id="rUn">helm uninstall web</button>
+    <button class="btn small" id="rUnK">uninstall --keep-history</button>
+  </div>
+  <div class="sim-row" style="margin-bottom:10px">
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="rWait"> --wait</label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="rAuto"> --rollback-on-failure</label>
+    <label>Roll back to revision<input class="input" type="number" min="1" value="1" id="rbRev"></label>
+  </div>
+  <div class="tbl-wrap"><table class="hist" id="rHist"></table></div>
+  <div class="secrets" id="rSec"></div>
+  <div class="pipe-out" id="rOut"></div>
+</div>`;
+function initRelease(el) {
+  const $ = s => el.querySelector(s);
+  const MAX = 10;   // helm upgrade --history-max default
+  let revs = [], chartMinor = 0, gone = false, newest = 0;
+  const cur = () => revs.filter(r => r.status === "deployed").pop();
+  const add = (status, chart, desc) => { newest = (revs.length ? revs[revs.length - 1].rev : 0) + 1; revs.push({ rev: newest, status, chart, desc }); while (revs.length > MAX) revs.shift(); };
+  const draw = msg => {
+    $("#rHist").innerHTML = `<tr><th>REVISION</th><th>STATUS</th><th>CHART</th><th>DESCRIPTION</th></tr>` + (revs.length ? revs.map(r => `<tr class="${r.rev === newest ? "new" : ""}"><td>${r.rev}</td><td class="st-${r.status}">${r.status}</td><td>${r.chart}</td><td>${r.desc}</td></tr>`).join("") : `<tr><td colspan="4" class="faint">Error: release: not found</td></tr>`);
+    $("#rSec").innerHTML = revs.map(r => `<span>sh.helm.release.v1.web.v${r.rev}</span>`).join("") || '<span class="faint">no release Secrets</span>';
+    $("#rbN").textContent = $("#rbRev").value;
+    if (msg) $("#rOut").innerHTML = msg;
+  };
+  const need = () => { if (!revs.length || gone) { draw('<span style="color:var(--red)">Error: UPGRADE FAILED: "web" has no deployed releases</span>'); return false; } return true; };
+  $("#rInstall").onclick = () => {
+    if (revs.length) return draw(`<span style="color:var(--red)">Error: INSTALLATION FAILED: cannot re-use a name that is still in use${gone ? " (history was kept: roll back, or install with --replace)" : ""}</span>`);
+    revs = []; gone = false; chartMinor = 0; add("deployed", "web-1.0.0", "Install complete");
+    draw('<span style="color:var(--green)">STATUS: deployed · REVISION: 1</span>');
+  };
+  $("#rUp").onclick = () => {
+    if (!need()) return;
+    const prev = cur(); chartMinor++;
+    if (prev) prev.status = "superseded";
+    add("deployed", `web-1.${chartMinor}.0`, "Upgrade complete");
+    draw(`<span style="color:var(--green)">Release "web" has been upgraded. REVISION: ${newest}</span>`);
+  };
+  $("#rBad").onclick = () => {
+    if (!need()) return;
+    const wait = $("#rWait").checked || $("#rAuto").checked, prev = cur();
+    const chart = prev ? prev.chart : "web-1.0.0";
+    if (!wait) {
+      if (prev) prev.status = "superseded";
+      add("deployed", chart, "Upgrade complete");
+      return draw('<span style="color:var(--amber)">⚠ Helm reports success: it applied the manifests and exited. The new Pods sit in ImagePullBackOff and Helm never noticed. Add --wait.</span>');
+    }
+    add("failed", chart, "Upgrade \"web\" failed: context deadline exceeded");
+    if ($("#rAuto").checked && prev) {
+      const target = prev.rev;
+      revs.forEach(r => { if (r.status === "deployed") r.status = "superseded"; });
+      add("deployed", prev.chart, `Rollback to ${target}`);
+      return draw(`<span style="color:var(--amber)">Upgrade failed after --timeout, so --rollback-on-failure rolled back to revision ${target} (as new revision ${newest}).</span>`);
+    }
+    draw('<span style="color:var(--red)">Error: UPGRADE FAILED: context deadline exceeded. The previous revision is still deployed; fix the image and upgrade again, or roll back.</span>');
+  };
+  $("#rRb").onclick = () => {
+    if (!need()) return;
+    const n = +$("#rbRev").value, target = revs.find(r => r.rev === n);
+    if (!target) return draw(`<span style="color:var(--red)">Error: release: not found (revision ${n} is not in history${revs[0] && revs[0].rev > 1 ? `; history-max pruned revisions before ${revs[0].rev}` : ""})</span>`);
+    revs.forEach(r => { if (r.status === "deployed") r.status = "superseded"; });
+    add("deployed", target.chart, `Rollback to ${n}`);
+    draw(`<span style="color:var(--green)">Rollback was a success! Happy Helming! (new revision ${newest} uses revision ${n}'s chart and values)</span>`);
+  };
+  $("#rUn").onclick = () => { if (!revs.length) return draw('<span style="color:var(--red)">Error: uninstall: Release not loaded: web: release: not found</span>'); revs = []; gone = false; draw('release "web" uninstalled: resources and all history Secrets deleted. Rollback is no longer possible.'); };
+  $("#rUnK").onclick = () => { if (!need()) return; revs[revs.length - 1].status = "uninstalled"; revs.forEach(r => { if (r.status === "deployed") r.status = "superseded"; }); revs[revs.length - 1].desc = "Uninstallation complete"; gone = true; draw('<span style="color:var(--amber)">Resources deleted, history kept. helm list --uninstalled shows it; helm rollback can bring it back.</span>'); };
+  $("#rbRev").oninput = () => draw();
+  // A kept-history uninstall can be rolled back, which revives the release.
+  const rb = $("#rRb").onclick;
+  $("#rRb").onclick = () => { if (gone && revs.length) { gone = false; } rb(); };
+  draw('<span class="faint"># no release yet: start with helm install</span>');
+}
+
+// --set to YAML converter, following the rules in the Using Helm guide.
+const sHtml = `
+<div class="sim glass">
+  <label style="display:block;margin-bottom:10px;font-size:13px">--set <input class="input" id="sIn" style="font-family:var(--mono)" value="image.tag=1.27,replicaCount=3,servers[0].port=80,hosts={a.com,b.com}"></label>
+  <div class="ctrl" style="margin:0 0 12px;flex-wrap:wrap" id="sEx"></div>
+  <div class="setgrid"><div class="code"><div class="code-head"><span>resulting values</span></div><pre id="sOut"></pre></div><div class="pipe-out" id="sNote" style="margin:0"></div></div>
+</div>`;
+function parseSet(str) {
+  // Split on unescaped commas that are not inside {...}
+  const parts = []; let buf = "", depth = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (c === "\\" && i + 1 < str.length) { buf += c + str[++i]; continue; }
+    if (c === "{") depth++; if (c === "}") depth--;
+    if (c === "," && depth === 0) { parts.push(buf); buf = ""; continue; }
+    buf += c;
+  }
+  if (buf) parts.push(buf);
+  const root = {};
+  for (const p of parts) {
+    const eq = p.search(/(?<!\\)=/);
+    if (eq < 0) throw new Error(`key "${p}" has no value`);
+    const key = p.slice(0, eq), raw = p.slice(eq + 1);
+    const segs = []; let s = "";
+    for (let i = 0; i < key.length; i++) {
+      if (key[i] === "\\" && key[i + 1] === ".") { s += "."; i++; continue; }
+      if (key[i] === "." ) { segs.push(s); s = ""; continue; }
+      s += key[i];
+    }
+    segs.push(s);
+    let val;
+    if (raw === "null") val = null;
+    else if (raw === "[]") val = [];
+    else if (/^\{.*\}$/.test(raw)) val = raw.slice(1, -1).split(",").map(x => scalar(x.trim()));
+    else val = scalar(raw.replace(/\\,/g, ","));
+    let node = root;
+    segs.forEach((seg, i) => {
+      const m = seg.match(/^(.*)\[(\d+)\]$/);
+      const last = i === segs.length - 1;
+      if (m) {
+        node[m[1]] = Array.isArray(node[m[1]]) ? node[m[1]] : [];
+        const arr = node[m[1]], idx = +m[2];
+        while (arr.length <= idx) arr.push(null);
+        if (last) arr[idx] = val; else { arr[idx] = arr[idx] && typeof arr[idx] === "object" ? arr[idx] : {}; node = arr[idx]; }
+      } else if (last) node[seg] = val;
+      else { node[seg] = node[seg] && typeof node[seg] === "object" && !Array.isArray(node[seg]) ? node[seg] : {}; node = node[seg]; }
+    });
+  }
+  return root;
+}
+function scalar(x) { if (/^-?\d+$/.test(x)) return +x; if (x === "true" || x === "false") return x === "true"; return x; }
+function toYaml(v, ind = 0) {
+  const pad = " ".repeat(ind);
+  if (Array.isArray(v)) return v.length ? v.map(x => x && typeof x === "object" ? `${pad}- ${toYaml(x, ind + 2).trimStart()}` : `${pad}- ${fmt(x)}`).join("\n") : `${pad}[]`;
+  return Object.entries(v).map(([k, x]) => x && typeof x === "object" ? (Array.isArray(x) && !x.length ? `${pad}${k}: []` : `${pad}${k}:\n${toYaml(x, ind + 2)}`) : `${pad}${k}: ${fmt(x)}`).join("\n");
+}
+function fmt(x) { if (x === null) return "null"; if (typeof x === "string" && (/[:,{}\[\]#]/.test(x) || x === "")) return JSON.stringify(x); return String(x); }
+function initSet(el) {
+  const $ = s => el.querySelector(s);
+  const EX = [["nested", "outer.inner=value"], ["list", "name={a, b, c}"], ["index", "servers[0].port=80,servers[0].host=example"], ["escape comma", "name=value1\\,value2"], ["escape dot", 'nodeSelector."kubernetes\\.io/role"=master'], ["null / empty", "name=[],a=null"]];
+  $("#sEx").innerHTML = EX.map((e, i) => `<button class="btn small" data-e="${i}">${e[0]}</button>`).join("");
+  el.querySelectorAll("[data-e]").forEach(b => b.onclick = () => { $("#sIn").value = EX[+b.dataset.e][1].replace(/"/g, ""); run(); });
+  const run = () => {
+    try {
+      const v = parseSet($("#sIn").value.trim());
+      $("#sOut").innerHTML = K8S_HL(toYaml(v) || "{}");
+      $("#sNote").innerHTML = '<span style="color:var(--green)">✓ parsed</span><br><span class="muted">--set wins over -f files, which win over the chart\'s values.yaml. Values set this way are stored in the release; clear them with <code>helm upgrade --reset-values</code>.</span>';
+    } catch (e) { $("#sOut").textContent = ""; $("#sNote").innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`; }
+  };
+  $("#sIn").oninput = run; run();
+}
+
+K8S_RENDER({
+  id: "helm-using", group: "intro", minutes: 25,
+  title: '<span class="grad-text">Using Helm</span>: install, upgrade, roll back',
+  lead: "The everyday commands: find a chart, install it with your values, upgrade it, and recover when an upgrade goes wrong. Every change is a numbered revision stored in the cluster.",
+  parts: [["Find & install", "search, show values, install"], ["Values", "-f files and --set"], ["Release lifecycle", "Revisions you can watch"], ["Useful flags", "wait, timeout, dry-run"]],
+  sections: [
+    { id: "find", title: "Find and install a chart", toc: "Find & install",
+      blocks: [
+        { type: "term", title: "search and install", lines: [
+          "$ helm search hub wordpress          # Artifact Hub",
+          "$ helm repo add bitnami https://charts.bitnami.com/bitnami",
+          "$ helm search repo wordpress         # repos you added, offline",
+          "NAME               CHART VERSION  APP VERSION  DESCRIPTION",
+          "bitnami/wordpress  …              …            WordPress is the world's most popular blogging…",
+          "$ helm show values bitnami/wordpress > my-values.yaml",
+          "$ helm install happy-panda bitnami/wordpress -f my-values.yaml",
+          "NAME: happy-panda",
+          "STATUS: deployed",
+          "REVISION: 1",
+          "✓ NOTES: … how to reach the site and get the admin password"
+        ] },
+        { type: "table", head: ["Install from", "Example"], rows: [
+          ["Repository", "<code>helm install web bitnami/nginx</code>"],
+          ["OCI registry", "<code>helm install web oci://registry.example.com/charts/nginx --version 1.2.0</code>"],
+          ["Packaged chart", "<code>helm install web ./nginx-1.2.0.tgz</code>"],
+          ["Chart folder", "<code>helm install web ./nginx</code>"],
+          ["URL", "<code>helm install web https://example.com/charts/nginx-1.2.0.tgz</code>"]
+        ] },
+        { type: "callout", kind: "info", html: "Helm applies resources in a fixed kind order: Namespace, NetworkPolicy, ResourceQuota, LimitRange, … ServiceAccount, Secret, ConfigMap, StorageClass, PV, PVC, CRD, RBAC, Service, DaemonSet, Pod, … Deployment, HPA, StatefulSet, Job, CronJob, Ingress, APIService, webhooks." }
+      ] },
+    { id: "values", title: "Supplying values", toc: "Values",
+      lead: "<code>-f</code>/<code>--values</code> takes a YAML file (repeatable; the rightmost wins). <code>--set</code> takes key=value pairs on the command line and wins over both. Try the syntax:",
+      blocks: [{ type: "custom", html: sHtml, init: initSet },
+        { type: "callout", kind: "tip", html: "Deep structures are painful with <code>--set</code>. Use a values file for anything nested, and keep <code>--set</code> for one-off overrides like an image tag in CI. <code>--set-string</code> forces strings, <code>--set-file</code> reads a value from a file, <code>--set-json</code> takes JSON." }] },
+    { id: "lifecycle", title: "Release lifecycle", toc: "Release lifecycle",
+      lead: "Every install, upgrade and rollback adds a revision. Try a broken upgrade with and without <code>--wait</code>, then roll back.",
+      blocks: [{ type: "custom", html: rHtml, init: initRelease },
+        { type: "cards", cols: 3, items: [
+          ["🔢", "Rollback = new revision", "<code>helm rollback web 1</code> doesn't rewind history. It creates revision N+1 with revision 1's chart and values."],
+          ["🗑️", "Uninstall deletes history", "Unless you pass <code>--keep-history</code>. Then <code>helm list --uninstalled</code> shows it and a rollback can revive it."],
+          ["📚", "History is capped", "<code>helm upgrade</code> keeps 10 revisions by default (<code>--history-max</code>). Older Secrets are pruned."]
+        ] }] },
+    { id: "flags", title: "Helpful flags", toc: "Useful flags",
+      blocks: [
+        { type: "table", head: ["Flag", "What it does"], rows: [
+          ["<code>--wait</code>", "Wait until resources are ready, up to <code>--timeout</code>. Bare <code>--wait</code> means <code>--wait=watcher</code> (kstatus). Without the flag Helm uses <code>hookOnly</code>: it waits for hooks only."],
+          ["<code>--timeout 10m</code>", "How long to wait for Kubernetes operations. Default <code>5m0s</code>."],
+          ["<code>--rollback-on-failure</code>", "Helm 4 name for <code>--atomic</code>: on failure, roll back (install: uninstall). Implies waiting."],
+          ["<code>--install</code>", "On <code>helm upgrade</code>: install if the release doesn't exist. The usual CI command is <code>helm upgrade --install</code>."],
+          ["<code>--dry-run=client|server</code>", "Render and validate without changing the cluster; <code>server</code> also runs <code>lookup</code> and server-side validation."],
+          ["<code>--reuse-values</code> / <code>--reset-values</code>", "On upgrade, keep the previous release's values, or start again from the chart defaults."],
+          ["<code>--no-hooks</code>", "Skip chart hooks for this command."],
+          ["<code>-n</code> / <code>--create-namespace</code>", "Target namespace, and create it if missing."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🔍", "search → show values → install", "Read the defaults before overriding them."],
+      ["⚖️", "Values precedence", "chart values.yaml < -f files (rightmost wins) < --set."],
+      ["⏳", "Use --wait in CI", "Without it, a broken image still reports success."],
+      ["⏪", "Rollback adds a revision", "History is never rewritten."],
+      ["🗑️", "Uninstall is final", "Unless --keep-history."],
+      ["🔁", "upgrade --install", "Idempotent deploy command."]
+    ],
+    cheat: `helm upgrade --install web ./chart -n web --create-namespace -f prod.yaml --wait --timeout 10m
+helm history web -n web
+helm rollback web 3 -n web
+helm get values web -n web           # user-supplied values (add --all for merged)
+helm get manifest web -n web
+helm uninstall web -n web --keep-history`,
+    quiz: [
+      ["Both -f prod.yaml and --set replicaCount=5 set replicaCount. Which wins?", ["prod.yaml", "--set", "values.yaml", "Error"], 1, "--set has the highest precedence."],
+      ["You roll back from revision 4 to revision 2. What is the new revision number?", ["2", "4", "5", "1"], 2, "Rollback creates a new revision."],
+      ["An upgrade with a typo in the image tag runs without --wait. What does helm report?", ["Failed", "Deployed", "Pending", "Superseded"], 1, "Helm only checks readiness when told to wait."],
+      ["What does --set name={a,b} produce?", ["A string \"a,b\"", "A list [a, b]", "Two keys", "An error"], 1, "Braces create a list."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

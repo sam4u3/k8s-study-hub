@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNI Pod Networking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+K8S_RENDER({
+  id: "net-cni", group: "networking", minutes: 25,
+  title: '<span class="grad-text">CNI</span>: how every Pod gets an IP',
+  lead: "Kubernetes defines the rules of the network but ships no network. A CNI plugin implements them: it wires each Pod into the node and the node into the cluster.",
+  parts: [["The model", "3 rules every CNI obeys"], ["Inside a node", "netns, veth, bridge"], ["Shared localhost", "Multi-container demo"], ["Across nodes", "Overlay vs routing"]],
+  sections: [
+    { id: "model", title: "The Kubernetes network model", toc: "Network model",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["1️⃣", "Every Pod gets its own IP", "Containers in a Pod share it. No port mapping between Pod and node needed."],
+          ["2️⃣", "Pods reach all Pods without NAT", "Pod A on node 1 talks to Pod B on node 2 using B's real IP."],
+          ["3️⃣", "Nodes reach all Pods", "Agents on a node (kubelet probes) can reach any Pod directly."]
+        ] },
+        { type: "callout", kind: "info", html: "The model is flat and simple for apps. The complexity moves into the CNI plugin. Services (virtual IPs) are a separate layer on top, handled by kube-proxy: see the kube-proxy topic." },
+        { type: "h3", text: "What a CNI plugin is" },
+        { type: "p", html: "A CNI plugin is just an executable in <code>/opt/cni/bin</code> plus a config in <code>/etc/cni/net.d</code>. The container runtime runs it with <code>ADD</code> when a Pod sandbox starts and <code>DEL</code> when it stops, passing the netns path and Pod info as environment variables and JSON on stdin. Most plugins also run a DaemonSet agent for routes and policy." }
+      ] },
+    { id: "node", title: "Inside one node", toc: "Inside a node",
+      lead: "Follow CNI ADD for one Pod on a bridge-based plugin (Flannel style).",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📦", "Sandbox", "Runtime creates a netns", "RunPodSandbox creates a new network namespace, e.g. <code>/var/run/netns/cni-1a2b…</code>, held by the pause container."],
+          ["📜", "Config", "Runtime reads CNI config", "First file in <code>/etc/cni/net.d</code>, e.g. <code>10-flannel.conflist</code>, names the plugin chain: flannel → bridge → host-local IPAM → portmap."],
+          ["🔗", "veth", "Create a veth pair", "One end becomes <code>eth0</code> inside the Pod netns; the other (<code>vethXXXX</code>) stays on the host."],
+          ["🌉", "Bridge", "Attach to the bridge", "Host end plugs into bridge <code>cni0</code>, which acts like a virtual switch for all Pods on this node."],
+          ["🔢", "IPAM", "Assign an IP", "IPAM picks a free IP from this node's Pod CIDR (e.g. 10.244.1.0/24) and sets routes: default via 10.244.1.1 (cni0)."],
+          ["✅", "Result", "Return result to runtime", "The plugin prints the IP back as JSON. kubelet records it in <code>status.podIP</code>."]
+        ] },
+        { type: "layers", items: [
+          ["Pod A  eth0 10.244.1.5   |   Pod B  eth0 10.244.1.6", "each in its own netns", "#34d399"],
+          ["vethA ⇄   |   vethB ⇄", "veth pairs: virtual cable between netns and host", "#22d3ee"],
+          ["cni0 bridge 10.244.1.1/24", "same-node Pod traffic is switched here", "#8b5cf6"],
+          ["flannel.1 (VXLAN) / eth0 of the node", "leaves the node for other nodes' Pod CIDRs", "#5b8cff"]
+        ] }
+      ] },
+    { id: "localhost", title: "Containers in a Pod share localhost", toc: "Shared localhost",
+      lead: "Demo: one Pod, busybox + nginx. busybox reaches nginx on localhost because both joined the same network namespace.",
+      blocks: [
+        { type: "code", title: "multi.yaml", code: `apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-namespace
+spec:
+  containers:
+  - name: p1
+    image: busybox
+    command: ['/bin/sh', '-c', 'sleep 10000']
+  - name: p2
+    image: nginx` },
+        { type: "term", title: "prove it", lines: [
+          "$ kubectl apply -f multi.yaml",
+          "$ kubectl exec -it shared-namespace -c p1 -- wget -qO- http://localhost | head -4",
+          "<!DOCTYPE html>",
+          "<html>",
+          "<head>",
+          "<title>Welcome to nginx!</title>",
+          "$ kubectl exec shared-namespace -c p1 -- ip a     # same eth0 + IP as p2",
+          "# on the node that runs the Pod:",
+          "$ ip link show | grep veth                          # a new veth appeared",
+          "$ sudo ip netns list",
+          "cni-7e3f2c1d-…",
+          "$ sudo ip netns exec cni-7e3f2c1d-… ip a",
+          "$ sudo lsns -t net | grep -E 'pause|nginx|sleep'   # all share one net namespace",
+          "✓ one Pod = one network namespace, owned by pause"
+        ] },
+        { type: "callout", kind: "warn", html: "Shared network means shared ports: two containers in one Pod cannot both listen on :80." }
+      ] },
+    { id: "cross", title: "Across nodes: overlay or routing", toc: "Across nodes",
+      lead: "Each node owns a slice of the Pod CIDR. To reach a Pod on another node, packets are either encapsulated (overlay) or routed natively.",
+      blocks: [
+        { type: "pipeline", intro: "Pod A (10.244.1.5 on node 1) sends to Pod C (10.244.2.7 on node 2).",
+          stages: [["Pod A eth0", "src 10.244.1.5"], ["veth → cni0", "node 1"], ["Route lookup", "10.244.2.0/24 ?"], ["Encap / route", "VXLAN or BGP"], ["Node 2", "decap / route"], ["Pod C eth0", "dst 10.244.2.7"]],
+          scenarios: [
+            { label: "Flannel VXLAN (overlay)", notes: ["packet leaves Pod netns", "switched to host", "route says: via flannel.1", "wrapped in UDP:8472, outer IPs = node IPs 10.0.0.11 → 10.0.0.12", "VXLAN header removed", ""], out: '<span style="color:var(--green)">✓ delivered · works on any L3 network · ~50 bytes overhead per packet</span>' },
+            { label: "Calico BGP (routed)", notes: ["packet leaves Pod netns", "routed by host", "BGP-learned route: 10.244.2.0/24 via 10.0.0.12", "sent as-is, no encapsulation", "host routes to Pod veth", ""], out: '<span style="color:var(--green)">✓ delivered · no overhead · underlay must accept Pod routes (BGP peering or same L2)</span>' },
+            { label: "Cilium eBPF", notes: ["eBPF program on veth", "bypasses iptables", "eBPF map lookup", "VXLAN/Geneve or native routing", "eBPF delivers to Pod", ""], out: '<span style="color:var(--green)">✓ delivered · can replace kube-proxy · rich L3–L7 policy and observability (Hubble)</span>' }
+          ] },
+        { type: "table", head: ["Plugin", "Data path", "NetworkPolicy", "Good for"], rows: [
+          ["Flannel", "VXLAN overlay (default)", "❌ (needs Calico alongside)", "Labs, simple clusters"],
+          ["Calico", "BGP routing or IP-in-IP/VXLAN, eBPF option", "✅", "Production, on-prem, policy-heavy"],
+          ["Cilium", "eBPF, overlay or native", "✅ L3–L7", "Performance, observability, kube-proxy replacement"],
+          ["Cloud CNIs (AWS VPC CNI, Azure CNI)", "Pods get VPC IPs", "✅ with add-on", "Managed clusters, native cloud routing"]
+        ] },
+        { type: "callout", kind: "tip", html: "The <code>--pod-network-cidr</code> you passed to <code>kubeadm init</code> must match the CNI config, and must not overlap node or Service CIDRs. Overlap symptoms: Pods can't reach some nodes or external networks." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🌐", "Flat Pod network", "Every Pod has an IP; Pod-to-Pod without NAT."],
+      ["🧩", "CNI = binary + config", "/opt/cni/bin and /etc/cni/net.d; called on ADD/DEL."],
+      ["🔗", "veth + bridge", "Pod eth0 ⇄ host veth ⇄ cni0 bridge."],
+      ["⏸️", "Pod shares one netns", "Containers share IP and localhost; ports must not clash."],
+      ["🚇", "Overlay vs routed", "VXLAN works anywhere; BGP routing has no overhead."],
+      ["🛡️", "Policy needs support", "Flannel alone doesn't enforce NetworkPolicy."]
+    ],
+    cheat: `ls /etc/cni/net.d /opt/cni/bin
+kubectl get pods -o wide                     # Pod IPs and nodes
+kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'
+ip link show type veth; ip route; bridge link
+sudo ip netns list; sudo lsns -t net
+kubectl run tmp --rm -it --image=nicolaka/netshoot -- bash`,
+    quiz: [
+      ["Who calls the CNI plugin?", ["kube-proxy", "The container runtime during sandbox setup", "kube-scheduler", "CoreDNS"], 1, "containerd/CRI-O execute CNI ADD for each new sandbox."],
+      ["Why can busybox reach nginx on localhost in the same Pod?", ["Same node", "They share the pause container's network namespace", "A Service exists", "hostNetwork is true"], 1, "One Pod = one network namespace."],
+      ["What does VXLAN do in Flannel?", ["Encrypts traffic", "Encapsulates Pod packets in UDP between nodes", "Assigns Service IPs", "Resolves DNS"], 1, "Overlay networking wraps the inner Pod packet."],
+      ["Which plugin alone does NOT enforce NetworkPolicy?", ["Calico", "Cilium", "Flannel", "Antrea"], 2, "Flannel only provides connectivity."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

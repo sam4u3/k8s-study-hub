@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chart Anatomy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .tree { display: grid; grid-template-columns: minmax(200px, 260px) 1fr; gap: 14px; }
+  .tree .files { font: 13px var(--mono); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .tree .files button { text-align: left; background: none; border: 1px solid transparent; color: var(--text); font: inherit; padding: 5px 8px; border-radius: 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tree .files button:hover { background: rgba(255,255,255,.05); }
+  .tree .files button.on { background: rgba(91,140,255,.18); border-color: rgba(91,140,255,.5); }
+  .tree .files .opt { color: var(--muted); }
+  .tree .pane { min-width: 0; }
+  .tree .pane h4 { margin: 0 0 6px; font-family: var(--mono); }
+  .tree .pane p { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+  @media (max-width: 640px) { .tree { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+const FILES = [
+  ["web/", 0, "The chart directory", "The folder name is the chart name, without a version. <code>helm create web</code> generates this layout.", ""],
+  ["Chart.yaml", 1, "Required: chart metadata", "Name, version, appVersion, type, dependencies, maintainers. Extra fields aren't allowed (Helm drops them and lint complains); put custom metadata in <code>annotations</code>.", `apiVersion: v2
+name: web
+description: A small web app
+type: application
+version: 1.4.0        # chart version (SemVer 2)
+appVersion: "2.7.1"   # app version, quoted
+kubeVersion: ">= 1.30.0-0"`],
+  ["values.yaml", 1, "Default configuration", "Every value a template reads should have a default here, with a comment. Users override it with -f and --set.", `# replicaCount is the number of web Pods.
+replicaCount: 2
+image:
+  repository: ghcr.io/example/web
+  tag: ""            # defaults to .Chart.AppVersion
+service:
+  type: ClusterIP
+  port: 80`],
+  ["values.schema.json", 1, "Optional: JSON Schema for values", "Validated on install, upgrade, lint and template. Catches typos and wrong types before anything reaches the cluster.", `{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["replicaCount"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 }
+  }
+}`],
+  ["Chart.lock", 1, "Generated: pinned dependency versions", "Written by <code>helm dependency update</code>. Commit it so builds are repeatable; <code>helm dependency build</code> uses it.", ""],
+  ["charts/", 1, "Dependencies (subcharts)", "Packaged or unpacked charts this chart depends on. Usually filled by <code>helm dependency update</code> from Chart.yaml.", ""],
+  ["crds/", 1, "Custom Resource Definitions", "Plain YAML, not templated. Installed before templates on <b>install only</b>. Never upgraded, never deleted.", ""],
+  ["templates/", 1, "Templates", "Go templates rendered with values into Kubernetes manifests. Files starting with <code>_</code> don't produce output.", ""],
+  ["deployment.yaml", 2, "A manifest template", "Mostly YAML with <code>{{ }}</code> actions that insert values.", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "web.fullname" . }}
+  labels:
+    {{- include "web.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}`],
+  ["service.yaml", 2, "Another manifest template", "One resource per file, file named after the kind, is the recommended layout.", ""],
+  ["_helpers.tpl", 2, "Named templates (partials)", "Holds <code>define</code> blocks such as <code>web.fullname</code> and <code>web.labels</code>. Rendered only when included.", `{{- define "web.fullname" -}}
+{{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" }}
+{{- end }}`],
+  ["NOTES.txt", 2, "Post-install notes", "A template printed after install and upgrade, and by <code>helm status</code>. Tell users how to reach the app.", `Get the URL:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "web.fullname" . }} 8080:{{ .Values.service.port }}`],
+  ["tests/test-connection.yaml", 2, "Chart test", "A Pod with the <code>helm.sh/hook: test</code> annotation, run by <code>helm test</code>.", ""],
+  [".helmignore", 1, "Files to leave out of the package", "Like .gitignore, for <code>helm package</code>.", `.git/
+*.swp
+ci/`],
+  ["README.md, LICENSE", 1, "Optional docs", "Shown by <code>helm show readme</code> and on Artifact Hub.", ""]
+];
+const tHtml = `<div class="tree glass sim"><div class="files">${FILES.map((f, i) => `<button data-f="${i}" style="padding-left:${8 + f[1] * 16}px"${/Optional|Generated/.test(f[2]) ? ' class="opt"' : ""}>${f[1] ? (/\/$/.test(f[0]) ? "📁 " : "📄 ") : "📦 "}${f[0]}</button>`).join("")}</div><div class="pane" id="tPane"></div></div>`;
+function initTree(el) {
+  const btns = [...el.querySelectorAll("[data-f]")], pane = el.querySelector("#tPane");
+  const show = i => {
+    btns.forEach((b, j) => b.classList.toggle("on", i === j));
+    const f = FILES[i];
+    pane.innerHTML = `<h4>${f[0]}</h4><p><b>${f[2]}.</b> ${f[3]}</p>${f[4] ? K8S_CODE(f[0], f[4]) : ""}`;
+    K8S.initCopy(pane);
+  };
+  btns.forEach((b, i) => b.onclick = () => show(i));
+  show(1);
+}
+
+// values.schema.json checker: a small schema with the rules Helm enforces before rendering.
+const vHtml = `
+<div class="sim glass">
+  <p class="muted" style="margin:0 0 10px;font-size:14px">Schema: <code>replicaCount</code> integer ≥ 1 (required), <code>service.type</code> one of ClusterIP / NodePort / LoadBalancer, <code>image.repository</code> string (required).</p>
+  <div class="sim-row">
+    <label>--set replicaCount=<input class="input" id="vRep" value="2"></label>
+    <label>--set service.type=<input class="input" id="vType" value="ClusterIP"></label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="vRepo" checked> image.repository set</label>
+  </div>
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="vGo">helm install web ./web</button></div>
+  <div class="pipe-out" id="vOut"></div>
+</div>`;
+function initSchema(el) {
+  const $ = s => el.querySelector(s);
+  $("#vGo").onclick = () => {
+    const errs = [], r = $("#vRep").value.trim(), t = $("#vType").value.trim();
+    if (r === "") errs.push("replicaCount: required");
+    else if (!/^-?\d+$/.test(r)) errs.push(`replicaCount: expected integer, got string "${r}"`);
+    else if (+r < 1) errs.push(`replicaCount: must be >= 1 but found ${r}`);
+    if (!["ClusterIP", "NodePort", "LoadBalancer"].includes(t)) errs.push(`service.type: value must be one of "ClusterIP", "NodePort", "LoadBalancer"`);
+    if (!$("#vRepo").checked) errs.push("image: missing property 'repository'");
+    $("#vOut").innerHTML = errs.length
+      ? `<span style="color:var(--red)">Error: INSTALLATION FAILED: values don't meet the specifications of the schema(s) in the following chart(s):<br>web:<br>${errs.map(e => "- " + e).join("<br>")}</span><br><span class="faint">Nothing was sent to the cluster.</span>`
+      : '<span style="color:var(--green)">✓ values valid · templates rendered · NAME: web STATUS: deployed REVISION: 1</span>';
+  };
+  $("#vGo").onclick();
+}
+
+K8S_RENDER({
+  id: "helm-charts", group: "charts", minutes: 20,
+  title: 'Chart <span class="grad-text">anatomy</span>',
+  lead: "A chart is a directory with a fixed layout. Helm reserves a few file and folder names; everything else in the chart is left alone. Click through a chart below.",
+  parts: [["File tree", "Every file explained"], ["Chart.yaml", "Metadata fields"], ["Chart types & CRDs", "application, library, crds/"], ["Schema & packaging", "Validate, lint, package"]],
+  sections: [
+    { id: "tree", title: "What's in a chart", toc: "File tree",
+      blocks: [{ type: "custom", html: tHtml, init: initTree }] },
+    { id: "chartyaml", title: "Chart.yaml", toc: "Chart.yaml",
+      blocks: [
+        { type: "yaml", title: "Chart.yaml", lines: [
+          ["apiVersion: v2", "Chart API version. v2 is for Helm 3 and 4 charts; v1 was Helm 2 (it used requirements.yaml). Charts v3 is experimental in Helm 4."],
+          ["name: web", "Required. Must match the directory name when packaging."],
+          ["description: A small web app"],
+          ["type: application", "application (default, installable) or library (helpers only, can't be installed)."],
+          ["version: 1.4.0", "Required. The chart's own SemVer 2 version. Packages are named web-1.4.0.tgz; repositories index by it."],
+          ['appVersion: "2.7.1"', "Version of the app inside. Informational; quote it so YAML doesn't turn 1.10 into 1.1."],
+          ['kubeVersion: ">= 1.30.0-0"', "SemVer constraint checked at install. The -0 suffix lets pre-release cluster versions like 1.31.0-eks match."],
+          ["dependencies:", "Charts this chart needs; helm dependency update downloads them into charts/."],
+          ["  - name: postgresql"],
+          ['    version: "~16.0.0"', "A range: any 16.0.x patch."],
+          ["    repository: oci://registry-1.docker.io/bitnamicharts", "HTTP repo URL, an @alias of a repo you added, or an OCI reference."],
+          ["    condition: postgresql.enabled", "Values path that turns this dependency on or off."],
+          ["maintainers:"],
+          ["  - name: Platform Team"],
+          ["annotations:", "Free-form metadata. Extra top-level fields aren't allowed, so custom data goes here."],
+          ["  category: web"],
+          ["deprecated: false", "Set true to mark the chart deprecated in repositories."]
+        ] }
+      ] },
+    { id: "types", title: "Chart types and CRDs", toc: "Chart types & CRDs",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "type: application", chip: "default", chipClass: "blue", color: "var(--k8s-2)", items: ["Renders manifests and can be installed", "Can depend on other charts", "Can still be used as a dependency (subchart)"] },
+          { title: "type: library", chip: "helpers only", chipClass: "violet", color: "var(--violet)", items: ["Defines named templates for other charts", "Produces no resources", "<code>helm install</code> refuses it"] }
+        ] },
+        { type: "callout", kind: "warn", html: "<b>CRDs in <code>crds/</code></b> are installed only on <code>helm install</code>, before templates render. Helm never upgrades or deletes them, because deleting a CRD deletes every custom resource of that kind in the whole cluster. Upgrade CRDs yourself (<code>kubectl apply</code>) or ship them in a separate chart." },
+        { type: "p", html: "Templates can adapt to the cluster with <code>.Capabilities</code>: <code>.Capabilities.KubeVersion</code> and <code>.Capabilities.APIVersions.Has \"policy/v1\"</code>." }
+      ] },
+    { id: "schema", title: "Schema, lint and package", toc: "Schema & packaging",
+      lead: "A <code>values.schema.json</code> rejects bad values on install, upgrade, lint and template, before anything reaches the cluster.",
+      blocks: [
+        { type: "custom", html: vHtml, init: initSchema },
+        { type: "term", title: "chart workflow", lines: [
+          "$ helm create web",
+          "Creating web",
+          "$ helm lint ./web",
+          "==> Linting ./web",
+          "[INFO] Chart.yaml: icon is recommended",
+          "1 chart(s) linted, 0 chart(s) failed",
+          "$ helm template web ./web | kubectl apply --dry-run=server -f -",
+          "$ helm package ./web",
+          "✓ Successfully packaged chart and saved it to: ./web-1.4.0.tgz"
+        ] },
+        { type: "callout", kind: "tip", html: "Helm 4 builds reproducible archives: the same chart contents give the same .tgz, so digests are stable for OCI and signing. Set <code>SOURCE_DATE_EPOCH</code> to control timestamps." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📄", "Chart.yaml", "apiVersion v2, name, version required; appVersion quoted."],
+      ["⚙️", "values.yaml", "Every value documented with a default."],
+      ["🧩", "templates/", "Go templates; _ files hold helpers."],
+      ["🧱", "crds/", "Install-only, never upgraded or deleted."],
+      ["🛡️", "values.schema.json", "Fail fast on bad values."],
+      ["📚", "library type", "Shared helpers, not installable."]
+    ],
+    cheat: `helm create web
+helm lint ./web --strict
+helm template web ./web -f values-prod.yaml
+helm show chart|values|readme|crds ./web
+helm package ./web --version 1.4.1 --app-version 2.7.2
+helm pull bitnami/nginx --untar     # read someone else's chart`,
+    quiz: [
+      ["Which field is NOT required in Chart.yaml?", ["apiVersion", "name", "version", "appVersion"], 3, "appVersion is optional and informational."],
+      ["You change a CRD in crds/ and run helm upgrade. What happens to the CRD?", ["Updated", "Deleted and recreated", "Nothing", "Upgrade fails"], 2, "CRDs are only installed, never upgraded."],
+      ["Which files in templates/ don't render output?", ["Files ending in .txt", "Files starting with _", "Files in tests/", "All .tpl files"], 1, "Underscore files hold partials; NOTES.txt is special too."],
+      ["When is values.schema.json checked?", ["Only on lint", "install, upgrade, lint and template", "Never automatically", "Only in CI"], 1, "Validation runs before rendering."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

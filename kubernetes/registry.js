@@ -1,8 +1,18 @@
-/* Topic registry for the dashboard (index.html), the docs map and the previous/next links on topic pages.
-   Groups and their order follow the Concepts section of the official Kubernetes documentation
-   (https://kubernetes.io/docs/concepts/), with Getting Started first and Tutorials last.
-   To add a topic: put the HTML file in topics/, then add an entry with status "ready" and its file path.
+/* Kubernetes app: topic registry for its dashboard (kubernetes/index.html), the docs map and the
+   previous/next links on topic pages. Groups and their order follow the Concepts section of the official
+   Kubernetes documentation (https://kubernetes.io/docs/concepts/), with Getting Started first and Tutorials last.
+   To add a topic: put the HTML file in kubernetes/topics/, then add an entry with status "ready" and its file path.
    Entries with status "planned" show as roadmap cards. */
+window.K8S_APP = {
+  id: "kubernetes",
+  name: "Kubernetes",
+  title: 'Kubernetes <span class="grad-text">Study Hub</span>',
+  lead: "Interactive study pages organised like the official Kubernetes documentation: from getting started through workloads, networking, storage and security to cluster administration and extending Kubernetes.",
+  logo: "wheel",
+  docsBase: "https://kubernetes.io/docs/",
+  links: [["📘 Kubernetes docs", "https://kubernetes.io/docs/concepts/"], ["📘 Docs coverage map", "docs-map.html"]],
+  footer: 'Topics are grouped like the <a href="https://kubernetes.io/docs/concepts/" target="_blank" rel="noopener">official Kubernetes documentation</a> (CC BY 4.0), with extra material from project docs and release notes.'
+};
 window.K8S_GROUPS = [
   {
     "id": "setup",
@@ -1270,3 +1280,5 @@ window.K8S_ID_MIGRATION = {
   "21-final-demo": "tut-end-to-end",
   "01-bootstrap": "setup-kubeadm"
 };
+
+(window.STUDY_APPS = window.STUDY_APPS || {})[window.K8S_APP.id] = { app: window.K8S_APP, groups: window.K8S_GROUPS, topics: window.K8S_TOPICS };

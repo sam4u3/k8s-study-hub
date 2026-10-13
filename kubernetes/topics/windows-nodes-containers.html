@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows Nodes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .wn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0; }
+  .wn { padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,.03); font-size: 12.5px; min-width: 0; transition: border-color .3s, box-shadow .3s, opacity .3s; }
+  .wn h5 { margin: 0 0 6px; font: 600 13px var(--mono); }
+  .wn .lab { font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  .wn .res { margin-top: 8px; font-weight: 600; }
+  .wn.no { opacity: .45; }
+  .wn.ok { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .wn.bad { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; }
+  .wopts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 16px; font-size: 13px; }
+  .wopts label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .wopts .chk { flex-direction: row; align-items: center; gap: 8px; }
+  .wfields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 16px; font: 12px var(--mono); margin-bottom: 12px; }
+  .wfields label { display: flex; gap: 8px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 640px) { .wn-grid, .wopts, .wfields { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Hybrid-cluster placement: which node does this Pod land on, and does its container start there?
+const NODES = [
+  { name: "linux-1", os: "linux", build: "", taint: false },
+  { name: "win-2022", os: "windows", build: "10.0.20348", taint: true },
+  { name: "win-2025", os: "windows", build: "10.0.26100", taint: true }
+];
+const IMAGES = {
+  linux: { label: "nginx:1.27 (Linux)", os: "linux", build: "" },
+  w22: { label: "servercore/iis:windowsservercore-ltsc2022", os: "windows", build: "10.0.20348" },
+  w25: { label: "servercore/iis:windowsservercore-ltsc2025", os: "windows", build: "10.0.26100" }
+};
+const pHtml = `
+<div class="sim glass">
+  <div class="wopts">
+    <label>Container image<select class="input" id="wImg">${Object.entries(IMAGES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></label>
+    <label>nodeSelector kubernetes.io/os<select class="input" id="wOs"><option value="">(none)</option><option>linux</option><option>windows</option></select></label>
+    <label>nodeSelector node.kubernetes.io/windows-build<select class="input" id="wBuild"><option value="">(none)</option><option>10.0.20348</option><option>10.0.26100</option></select></label>
+    <label class="chk"><input type="checkbox" id="wTol"> toleration os=windows:NoSchedule</label>
+    <label class="chk"><input type="checkbox" id="wRc"> runtimeClassName: windows-2022</label>
+  </div>
+  <div class="wn-grid" id="wNodes"></div>
+  <div class="pipe-out" id="wOut"></div>
+</div>`;
+function initPlace(el) {
+  const $ = s => el.querySelector(s);
+  const run = () => {
+    const img = IMAGES[$("#wImg").value];
+    let os = $("#wOs").value, build = $("#wBuild").value, tol = $("#wTol").checked;
+    const rc = $("#wRc").checked;
+    const notes = [];
+    if (rc) {
+      // RuntimeClass scheduling merges its nodeSelector and tolerations into the Pod at admission.
+      if ((os && os !== "windows") || (build && build !== "10.0.20348")) notes.push('<span style="color:var(--red)">✗ RuntimeClass nodeSelector conflicts with the Pod\'s own nodeSelector: Pod rejected at admission</span>');
+      os = "windows"; build = "10.0.20348"; tol = true;
+    }
+    const fits = NODES.map(n => {
+      if (notes.length) return { n, why: "rejected" };
+      if (os && n.os !== os) return { n, why: `os=${n.os} ≠ ${os}` };
+      if (build && n.build !== build) return { n, why: n.build ? `build ${n.build} ≠ ${build}` : "no windows-build label" };
+      if (n.taint && !tol) return { n, why: "taint os=windows:NoSchedule not tolerated" };
+      return { n, fit: true };
+    });
+    const start = n => n.os !== img.os ? { ok: false, msg: `ErrImagePull: no ${n.os}/amd64 variant in the image manifest` }
+      : n.os === "windows" && n.build !== img.build ? { ok: false, msg: `container won't start: image build ${img.build} ≠ host ${n.build} (process isolation needs a match)` }
+      : { ok: true, msg: "Running" };
+    $("#wNodes").innerHTML = fits.map(f => {
+      const r = f.fit && start(f.n);
+      return `<div class="wn ${!f.fit ? "no" : r.ok ? "ok" : "bad"}"><h5>${f.n.name}</h5><div class="lab">kubernetes.io/os=${f.n.os}${f.n.build ? `<br>windows-build=${f.n.build}<br>taint os=windows:NoSchedule` : ""}</div>
+        <div class="res">${f.fit ? (r.ok ? '<span style="color:var(--green)">✓ candidate: ' : '<span style="color:var(--red)">✗ candidate: ') + r.msg + "</span>" : `<span class="faint">filtered: ${f.why}</span>`}</div></div>`;
+    }).join("");
+    const cand = fits.filter(f => f.fit), good = cand.filter(f => start(f.n).ok);
+    $("#wOut").innerHTML = notes.length ? notes.join("<br>")
+      : !cand.length ? '<span style="color:var(--amber)">⏳ Pending: FailedScheduling, 0 nodes match the selectors and tolerations</span>'
+      : good.length === cand.length ? `<span style="color:var(--green)">✓ Safe: every candidate node can run this image${cand.length > 1 ? " (the scheduler picks one by score)" : ""}</span>`
+      : good.length ? `<span style="color:var(--amber)">⚠ Gamble: ${good.length} of ${cand.length} candidate nodes work. The scheduler doesn't check image OS, so pin the Pod with selectors.</span>`
+      : '<span style="color:var(--red)">✗ Broken: the Pod schedules, then fails on the node. Fix the selectors.</span>';
+  };
+  el.querySelectorAll("select,input").forEach(i => i.onchange = run);
+  run();
+}
+
+// .spec.os.name: windows field checker, matching the API server's validation.
+const FIELDS = [
+  ["spec.hostPID", false], ["spec.securityContext.runAsUser", false], ["spec.securityContext.fsGroup", false],
+  ["spec.securityContext.seccompProfile", false], ["containers[].securityContext.privileged", false], ["containers[].securityContext.capabilities", false],
+  ["spec.securityContext.runAsNonRoot", true], ["spec.securityContext.windowsOptions.runAsUserName", true]
+];
+const fHtml = `
+<div class="sim glass">
+  <p class="muted" style="margin:0 0 10px;font-size:14px">The Pod sets <code>spec.os.name: windows</code>. Tick the fields it also sets, then submit.</p>
+  <div class="wfields">${FIELDS.map((f, i) => `<label><input type="checkbox" data-f="${i}"> ${f[0]}</label>`).join("")}</div>
+  <div class="ctrl" style="margin:0 0 12px"><button class="btn primary" id="fGo">kubectl apply</button></div>
+  <div class="pipe-out" id="fOut"><span class="faint"># waiting for apply</span></div>
+</div>`;
+function initFields(el) {
+  el.querySelector("#fGo").onclick = () => {
+    const bad = [...el.querySelectorAll("[data-f]:checked")].map(c => FIELDS[+c.dataset.f]).filter(f => !f[1]);
+    el.querySelector("#fOut").innerHTML = bad.length
+      ? `<span style="color:var(--red)">✗ The Pod "win-app" is invalid:<br>${bad.map(f => `* ${f[0]}: Forbidden: cannot be set for a windows pod`).join("<br>")}</span>`
+      : '<span style="color:var(--green)">✓ pod/win-app created</span>';
+  };
+}
+
+K8S_RENDER({
+  id: "win-nodes", group: "windows", minutes: 25,
+  title: '<span class="grad-text">Windows</span> nodes & containers',
+  lead: "A cluster can mix Windows and Linux worker nodes. The control plane stays on Linux. Most Kubernetes objects work the same on Windows, but there are real differences in isolation, networking, storage and security.",
+  parts: [["Hybrid clusters", "What runs where"], ["Placement simulator", "Selectors, taints, RuntimeClass"], ["API differences", "Fields Windows rejects"], ["Networking & storage", "HNS, CNI, volumes"], ["Resources & security", "Job objects, users, HostProcess"], ["Add a Windows node", "kubeadm join"]],
+  sections: [
+    { id: "hybrid", title: "A hybrid cluster", toc: "Hybrid clusters",
+      lead: "Control plane on Linux; worker nodes on Linux or Windows Server 2022 / 2025. A Pod is either all-Windows or all-Linux, never mixed.",
+      blocks: [
+        { type: "layers", items: [
+          ["Windows Pods", "process-isolated containers (Hyper-V isolation not supported)", "#38bdf8"],
+          ["containerd 1.4+ (or Mirantis Container Runtime)", "the CRI runtime on Windows nodes", "#a78bfa"],
+          ["kubelet + kube-proxy (Windows binaries)", "join the same cluster as Linux nodes", "#34d399"],
+          ["Windows Server 2022 / 2025 worker", "LTSC releases supported in v1.37", "#fbbf24"],
+          ["Linux control plane (separate nodes)", "API server, etcd, scheduler: Linux only", "#5b8cff"]
+        ] },
+        { type: "compare", cols: [
+          { title: "Works the same", chip: "supported", chipClass: "green", color: "var(--green)", items: ["Deployment, StatefulSet, DaemonSet, Job, CronJob", "Services: ClusterIP, NodePort, LoadBalancer, ExternalName", "Probes, lifecycle hooks, ConfigMaps, Secrets, emptyDir", "kubectl exec, metrics, HPA, ResourceQuota, preemption"] },
+          { title: "Not available on Windows", chip: "differences", chipClass: "red", color: "var(--red)", items: ["Privileged containers (use HostProcess)", "HugePages, hostNetwork for normal Pods, hostPID/hostIPC", "OOM eviction and the PIDPressure condition", "Read-only root filesystem, subPath mounts, NFS, raw block devices"] }
+        ] },
+        { type: "callout", kind: "warn", html: "Windows has strict version matching: with process isolation, the container base image build must match the node's Windows Server build. Windows images are also large (300MB to over 10GB), so plan disk space and pull times." }
+      ] },
+    { id: "place", title: "Getting Pods onto the right OS", toc: "Placement simulator",
+      lead: "The scheduler doesn't look at the image OS or at <code>.spec.os.name</code>. Selectors and taints are the only things that keep a Linux Pod off a Windows node and the reverse.",
+      blocks: [
+        { type: "custom", html: pHtml, init: initPlace },
+        { type: "callout", kind: "tip", html: "Try the default Linux image with no selector: it could land on any node. Then pick the ltsc2022 image with only the toleration, and see why the build label matters. Finally tick RuntimeClass and nothing else." },
+        { type: "tabs", tabs: [
+          { label: "Taint the Windows nodes", blocks: [
+            { type: "p", html: "Taint every Windows node when it registers, so existing Linux workloads and Helm charts never land there by accident." },
+            { type: "code", title: "kubelet flag on each Windows node", code: `--register-with-taints='os=windows:NoSchedule'` },
+            { type: "code", title: "Windows Pod spec", code: `spec:
+  os:
+    name: windows
+  nodeSelector:
+    kubernetes.io/os: windows
+    node.kubernetes.io/windows-build: '10.0.20348'   # Windows Server 2022
+  tolerations:
+  - key: "os"
+    operator: "Equal"
+    value: "windows"
+    effect: "NoSchedule"` }
+          ] },
+          { label: "RuntimeClass", blocks: [
+            { type: "p", html: "A RuntimeClass bundles the selectors and toleration, so a Pod only needs <code>runtimeClassName</code>." },
+            { type: "code", title: "runtimeclass.yaml", code: `apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: windows-2022
+handler: example-container-runtime-handler
+scheduling:
+  nodeSelector:
+    kubernetes.io/os: 'windows'
+    kubernetes.io/arch: 'amd64'
+    node.kubernetes.io/windows-build: '10.0.20348'
+  tolerations:
+  - effect: NoSchedule
+    key: os
+    operator: Equal
+    value: "windows"` }
+          ] },
+          { label: "Build labels", blocks: [
+            { type: "table", head: ["Windows Server", "node.kubernetes.io/windows-build"], rows: [["2022", "<code>10.0.20348</code>"], ["2025", "<code>10.0.26100</code>"]] },
+            { type: "p", html: "The kubelet sets this label automatically. It encodes the major, minor and build numbers that must match the image." }
+          ] }
+        ] }
+      ] },
+    { id: "api", title: "API differences", toc: "API differences",
+      lead: "Windows identity, permissions and signals work differently from Linux. Setting <code>spec.os.name: windows</code> tells the API server to reject Linux-only fields up front instead of failing on the node.",
+      blocks: [
+        { type: "custom", html: fHtml, init: initFields },
+        { type: "table", head: ["Concept", "Linux", "Windows"], rows: [
+          ["Identity", "Integer UID / GID", "Security identifier (SID), stored in a SAM database that isn't shared between host and container"],
+          ["File permissions", "Mode bits + UID/GID", "ACLs based on SIDs"],
+          ["Run as user", "<code>runAsUser</code>", "<code>windowsOptions.runAsUserName</code>; <code>runAsNonRoot</code> blocks ContainerAdministrator"],
+          ["Paths", "<code>/</code>", "<code>\\</code> (Go tooling accepts both)"],
+          ["Stopping", "SIGTERM, then SIGKILL", "CTRL_SHUTDOWN_EVENT to the entrypoint, then normal Windows shutdown"],
+          ["Pod security context", "Many fields", "Only <code>runAsNonRoot</code> and <code>windowsOptions</code> apply"]
+        ] }
+      ] },
+    { id: "net", title: "Networking and storage", toc: "Networking & storage",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📦", "Container vNIC", "Each container gets a virtual NIC", "Windows containers behave like small VMs on the network: every container has a vNIC attached to a Hyper-V virtual switch."],
+          ["🔀", "vSwitch", "Hyper-V virtual switch", "Connects vNICs to the node's network. HNS creates the vSwitches."],
+          ["🧭", "HNS", "Host Networking Service", "Manages networks, endpoints, namespaces and policies (encapsulation, load-balancing rules, ACLs, NAT). The CNI plugin calls HNS directly."],
+          ["⚙️", "HCS", "Host Compute Service", "Creates and manages the containers themselves and attaches their vNICs to HNS networks."],
+          ["🗂️", "Registry", "Config lives in the registry", "DNS, routes and metrics live in each container's Windows registry, not in /etc, so mounting resolv.conf does nothing."]
+        ] },
+        { type: "table", head: ["Network mode", "How it works", "CNI plugins"], rows: [
+          ["L2bridge", "Containers sit on the underlay; MACs rewritten to the host MAC", "win-bridge, Azure-CNI, Flannel host-gw"],
+          ["L2Tunnel", "Special L2bridge for Azure; SDN policy on the host", "Azure-CNI"],
+          ["Overlay", "VXLAN encapsulation, own subnet per network", "win-overlay, Flannel VXLAN (beta)"],
+          ["Transparent", "Logical switches and routers", "ovn-kubernetes"],
+          ["NAT", "Internal vSwitch with WinNAT", "Not used in Kubernetes"]
+        ] },
+        { type: "cards", cols: 3, items: [
+          ["🚫", "Network limits", "No host networking for normal Pods. No more than 64 backend Pods per Service. The node can't reach NodePorts on itself. Outbound ICMP through overlay/bridge doesn't return, so test with <code>curl</code>, not <code>ping</code>."],
+          ["⚡", "DSR", "Direct Server Return lets replies bypass the load balancer. Enable with kube-proxy <code>--enable-dsr=true</code>; needed for <code>externalTrafficPolicy: Local</code>."],
+          ["💾", "Storage", "CSI and in-tree <code>azureFile</code>/<code>vsphereVolume</code> work. Not supported: subPath, read-only root FS, block devices, <code>emptyDir</code> on memory, NFS, volume expansion (resizefs), Secret <code>defaultMode</code>."]
+        ] }
+      ] },
+    { id: "res", title: "Resources and security", toc: "Resources & security",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Linux node", chip: "cgroups", chipClass: "blue", color: "var(--k8s-2)", items: ["cgroups form the Pod boundary", "OOM killer ends processes over their limit", "kubelet can evict on memory and PID pressure", "<code>kube-reserved</code>/<code>system-reserved</code> are enforced"] },
+          { title: "Windows node", chip: "job objects", chipClass: "amber", color: "var(--amber)", items: ["One Windows <b>job object</b> per container (unrelated to a Kubernetes Job)", "No OOM killer: memory overflows to the pagefile and slows down", "CPU can be capped, but a minimum can't be guaranteed", "Reservations only reduce NodeAllocatable; set limits on every container"] }
+        ] },
+        { type: "callout", kind: "tip", html: "Start the kubelet with <code>--windows-priorityclass=ABOVE_NORMAL_PRIORITY_CLASS</code> so busy Pods can't starve it of CPU, and reserve at least 2GiB of memory for the system." },
+        { type: "cards", cols: 3, items: [
+          ["🔐", "Secrets on disk", "Secret volumes are written to the node's disk in clear text (Linux uses tmpfs). Protect the folder with file ACLs and encrypt the volume with BitLocker."],
+          ["👤", "Container users", "Nano Server images run as <code>ContainerUser</code>; Server Core images run as <code>ContainerAdministrator</code>. Set <code>runAsUserName</code> to choose."],
+          ["🏢", "gMSA", "Group Managed Service Accounts give a container an Active Directory identity for domain resources."]
+        ] },
+        { type: "code", title: "HostProcess Pod: the Windows answer to privileged containers", code: `apiVersion: v1
+kind: Pod
+metadata:
+  name: node-agent
+spec:
+  hostNetwork: true                 # required for HostProcess Pods
+  securityContext:
+    windowsOptions:
+      hostProcess: true
+      runAsUserName: "NT AUTHORITY\\SYSTEM"
+  nodeSelector:
+    kubernetes.io/os: windows
+  containers:
+  - name: agent
+    image: example.com/node-agent:1.0` },
+        { type: "callout", kind: "warn", html: "HostProcess containers run directly on the host with access to its network, filesystem and processes. Treat them like privileged Linux Pods: Pod Security <code>baseline</code> and <code>restricted</code> reject them." }
+      ] },
+    { id: "join", title: "Adding a Windows worker with kubeadm", toc: "Add a Windows node",
+      blocks: [
+        { type: "steps", steps: [
+          { title: "Prepare the cluster", where: "Linux control plane", why: "You need a working kubeadm cluster, and a CNI that supports Windows. Calico is the plugin the docs walk through for mixed clusters.", code: `kubectl get nodes -o wide
+kubeadm token create --print-join-command`, codeTitle: "bash" },
+          { title: "Install containerd", where: "Windows node (admin PowerShell)", whereClass: "amber", why: "The sig-windows-tools script installs containerd and the Windows CNI binaries. Use a containerd version without the <code>v</code> prefix.", code: `curl.exe -LO https://raw.githubusercontent.com/kubernetes-sigs/sig-windows-tools/master/hostprocess/Install-Containerd.ps1
+.\\Install-Containerd.ps1 -ContainerDVersion 1.7.22`, codeTitle: "PowerShell" },
+          { title: "Install kubelet and kubeadm", where: "Windows node", whereClass: "amber", why: "Match the cluster's Kubernetes version.", code: `curl.exe -LO https://raw.githubusercontent.com/kubernetes-sigs/sig-windows-tools/master/hostprocess/PrepareNode.ps1
+.\\PrepareNode.ps1 -KubernetesVersion v1.37.0`, codeTitle: "PowerShell" },
+          { title: "Join the cluster", where: "Windows node", whereClass: "amber", why: "Run the join command printed by the control plane. Join tokens expire after 24 hours by default.", code: `kubeadm join <control-plane-host>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>`, codeTitle: "PowerShell" },
+          { title: "Verify and taint", where: "Linux control plane", why: "The node should show the Windows OS label and its build. Add the taint if the kubelet didn't register with it.", code: `kubectl get nodes -L kubernetes.io/os,node.kubernetes.io/windows-build
+kubectl taint nodes <win-node> os=windows:NoSchedule`, codeTitle: "bash" }
+        ] },
+        { type: "callout", kind: "info", html: "Windows workloads often log to ETW or the event log rather than stdout. Microsoft's open-source <b>LogMonitor</b> forwards those to stdout so <code>kubectl logs</code> works." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🐧", "Linux control plane", "Only worker nodes can be Windows (Server 2022 / 2025)."],
+      ["🎯", "Pin with selectors", "kubernetes.io/os, windows-build, taints or a RuntimeClass. The scheduler ignores image OS."],
+      ["🔢", "Builds must match", "Process isolation needs the image build to equal the host build."],
+      ["🛡️", "No privileged", "Use HostProcess Pods for node-level agents."],
+      ["🧠", "No OOM killer", "Memory pages to disk; always set limits."],
+      ["🔐", "Secrets on disk", "Clear text on the node: use ACLs and BitLocker."]
+    ],
+    cheat: `kubectl get nodes -L kubernetes.io/os,node.kubernetes.io/windows-build
+kubectl describe node <win-node> | grep -i taints
+kubectl get runtimeclass
+kubectl get pods -o wide --field-selector spec.nodeName=<win-node>
+kubectl exec -it <win-pod> -- powershell
+kubectl logs <win-pod>          # needs stdout (LogMonitor for ETW/event log)`,
+    quiz: [
+      ["Which part of a cluster must run Linux?", ["Every node", "The control plane", "Only DNS", "None"], 1, "Workers can be Windows; the control plane can't."],
+      ["What keeps Linux Pods off Windows nodes without editing every chart?", ["spec.os.name", "A NoSchedule taint on the Windows nodes", "A NetworkPolicy", "A LimitRange"], 1, "The scheduler doesn't use spec.os.name."],
+      ["A Pod sets spec.os.name: windows and securityContext.runAsUser. Result?", ["Runs as that UID", "Rejected by the API server", "Ignored silently", "Runs as ContainerAdministrator"], 1, "Use windowsOptions.runAsUserName instead."],
+      ["What replaces privileged containers on Windows?", ["Hyper-V isolation", "HostProcess containers", "gMSA", "DaemonSets"], 1, "HostProcess Pods run on the host and need hostNetwork: true."],
+      ["A Windows container uses more memory than the node has. What happens?", ["OOM kill", "Kubelet eviction", "Memory pages to disk and slows down", "Node reboots"], 2, "Windows has no OOM killer; pagefiles are mandatory."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

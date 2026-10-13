@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helm Templates</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .play { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .play textarea { width: 100%; min-height: 190px; resize: vertical; font: 12.5px/1.55 var(--mono); color: var(--text); background: rgba(0,0,0,.25); border: 1px solid var(--border); border-radius: 10px; padding: 10px; box-sizing: border-box; }
+  .play .full { grid-column: 1 / -1; }
+  .play label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .play pre.out { margin: 0; min-height: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .play .row2 { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; }
+  @media (max-width: 700px) { .play, .play .row2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+/* A small Helm-style template engine for learning: .Values/.Release/.Chart lookups, pipelines,
+   a handful of Sprig/Helm functions, {{- -}} whitespace trimming and comments. */
+function parseYaml(src) {
+  const root = {}, stack = [{ ind: -1, obj: root }];
+  const lines = src.split("\n");
+  for (let n = 0; n < lines.length; n++) {
+    const raw = lines[n].replace(/\s+#.*$/, "").replace(/^\s*#.*$/, "");
+    if (!raw.trim()) continue;
+    const ind = raw.search(/\S/), line = raw.trim();
+    while (stack.length > 1 && ind <= stack[stack.length - 1].ind) stack.pop();
+    const parent = stack[stack.length - 1];
+    if (line.startsWith("- ")) {
+      if (!Array.isArray(parent.obj)) throw new Error(`line ${n + 1}: list item without a list key`);
+      parent.obj.push(yScalar(line.slice(2).trim()));
+      continue;
+    }
+    const m = line.match(/^([^:]+):(?:\s+(.*))?$/);
+    if (!m) throw new Error(`line ${n + 1}: could not parse "${line}"`);
+    if (Array.isArray(parent.obj)) throw new Error(`line ${n + 1}: mapping inside a list isn't supported here`);
+    const key = m[1].trim().replace(/^["']|["']$/g, "");
+    if (m[2] !== undefined && m[2] !== "") parent.obj[key] = m[2] === "[]" ? [] : m[2] === "{}" ? {} : yScalar(m[2]);
+    else {
+      const next = lines.slice(n + 1).find(l => l.trim() && !/^\s*#/.test(l));
+      const child = next && next.trim().startsWith("- ") ? [] : {};
+      parent.obj[key] = child;
+      stack.push({ ind, obj: child });
+    }
+  }
+  return root;
+}
+function yScalar(s) {
+  if (/^".*"$/.test(s)) return s.slice(1, -1);
+  if (/^'.*'$/.test(s)) return s.slice(1, -1);
+  if (/^-?\d+(\.\d+)?$/.test(s)) return +s;
+  if (s === "true" || s === "false") return s === "true";
+  if (s === "null" || s === "~") return null;
+  return s;
+}
+function deepMerge(a, b) {
+  const out = Array.isArray(a) ? a.slice() : { ...a };
+  for (const [k, v] of Object.entries(b)) out[k] = v && typeof v === "object" && !Array.isArray(v) && out[k] && typeof out[k] === "object" && !Array.isArray(out[k]) ? deepMerge(out[k], v) : v;
+  return out;
+}
+function setPairs(str) {
+  const o = {};
+  str.split(",").map(x => x.trim()).filter(Boolean).forEach(p => {
+    const i = p.indexOf("="); if (i < 0) throw new Error(`--set: "${p}" has no value`);
+    const path = p.slice(0, i).split("."); let node = o;
+    path.forEach((k, j) => { if (j === path.length - 1) node[k] = yScalar(p.slice(i + 1)); else node = node[k] = node[k] || {}; });
+  });
+  return o;
+}
+class TplError extends Error {}
+function goStr(v) {
+  if (v === undefined || v === null) return "";
+  if (Array.isArray(v)) return "[" + v.map(goStr).join(" ") + "]";
+  if (typeof v === "object") return "map[" + Object.keys(v).sort().map(k => k + ":" + goStr(v[k])).join(" ") + "]";
+  return String(v);
+}
+const FUNCS = {
+  upper: s => goStr(s).toUpperCase(),
+  lower: s => goStr(s).toLowerCase(),
+  title: s => goStr(s).replace(/\b\w/g, c => c.toUpperCase()),
+  quote: (...a) => a.map(s => JSON.stringify(goStr(s))).join(" "),
+  squote: (...a) => a.map(s => "'" + goStr(s) + "'").join(" "),
+  default: (d, v) => (v === undefined || v === null || v === "" || v === false || v === 0 || (typeof v === "object" && !Object.keys(v).length)) ? d : v,
+  trunc: (n, s) => goStr(s).slice(0, n),
+  repeat: (n, s) => goStr(s).repeat(Math.max(0, n)),
+  b64enc: s => btoa(unescape(encodeURIComponent(goStr(s)))),
+  trimSuffix: (x, s) => goStr(s).endsWith(x) ? goStr(s).slice(0, -x.length) : goStr(s),
+  replace: (a, b, s) => goStr(s).split(a).join(b),
+  printf: (f, ...a) => { let i = 0; return f.replace(/%[sdv]/g, () => goStr(a[i++])); },
+  indent: (n, s) => goStr(s).split("\n").map(l => " ".repeat(n) + l).join("\n"),
+  nindent: (n, s) => "\n" + goStr(s).split("\n").map(l => " ".repeat(n) + l).join("\n"),
+  toYaml: v => toYamlStr(v),
+  required: (msg, v) => { if (v === undefined || v === null || v === "") { const e = new TplError(msg); e.required = true; throw e; } return v; }
+};
+function toYamlStr(v, ind = 0) {
+  const pad = " ".repeat(ind);
+  if (v === undefined || v === null) return "null";
+  if (Array.isArray(v)) return v.map(x => `${pad}- ${goStr(x)}`).join("\n");
+  if (typeof v === "object") return Object.entries(v).map(([k, x]) => x && typeof x === "object" ? `${pad}${k}:\n${toYamlStr(x, ind + 2)}` : `${pad}${k}: ${x === "" ? '""' : goStr(x)}`).join("\n");
+  return goStr(v);
+}
+function tokenize(s) {
+  const t = []; let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === "|" || c === "(" || c === ")") { t.push(c); i++; continue; }
+    if (c === '"') { let j = i + 1, out = ""; while (j < s.length && s[j] !== '"') { if (s[j] === "\\") j++; out += s[j++]; } if (j >= s.length) throw new TplError("unterminated quoted string"); t.push({ str: out }); i = j + 1; continue; }
+    let j = i; while (j < s.length && !/[\s|()]/.test(s[j])) j++;
+    t.push(s.slice(i, j)); i = j;
+  }
+  return t;
+}
+function evalPipeline(src, ctx) {
+  const toks = tokenize(src);
+  // Go templates resolve function names at parse time, so an unknown name fails before anything runs.
+  toks.forEach(tk => {
+    if (typeof tk === "string" && !/^[|()]$/.test(tk) && !/^-?\d+$/.test(tk) && tk !== "true" && tk !== "false" && !tk.startsWith(".") && !FUNCS[tk]) {
+      const e = new TplError(`function "${tk}" not defined`); e.parse = true; throw e;
+    }
+  });
+  let pos = 0;
+  const term = () => {
+    const tk = toks[pos++];
+    if (tk === undefined) throw new TplError("missing value for command");
+    if (tk === "(") { const v = pipeline(); if (toks[pos++] !== ")") throw new TplError("unclosed left paren"); return v; }
+    if (typeof tk === "object") return tk.str;
+    if (/^-?\d+$/.test(tk)) return +tk;
+    if (tk === "true" || tk === "false") return tk === "true";
+    if (tk === ".") return ctx;
+    if (tk.startsWith(".")) {
+      const parts = tk.slice(1).split("."); let v = ctx, walked = "";
+      for (const p of parts) {
+        if (v === undefined || v === null) throw new TplError(`nil pointer evaluating interface {}.${p}`);
+        if (typeof v !== "object") throw new TplError(`can't evaluate field ${p} in type ${typeof v}`);
+        v = v[p]; walked += "." + p;
+      }
+      return v;
+    }
+    throw new TplError(`function "${tk}" not defined`);
+  };
+  const command = piped => {
+    const tk = toks[pos];
+    if (typeof tk === "string" && FUNCS[tk]) {
+      pos++;
+      const args = [];
+      while (pos < toks.length && toks[pos] !== "|" && toks[pos] !== ")") args.push(term());
+      if (piped.has) args.push(piped.v);
+      return FUNCS[tk](...args);
+    }
+    if (piped.has) throw new TplError(`can't give argument to non-function ${typeof tk === "string" ? tk : JSON.stringify(tk.str)}`);
+    const v = term();
+    if (pos < toks.length && toks[pos] !== "|" && toks[pos] !== ")") throw new TplError(`can't give argument to non-function`);
+    return v;
+  };
+  const pipeline = () => {
+    let v = command({ has: false });
+    while (toks[pos] === "|") { pos++; v = command({ has: true, v }); }
+    return v;
+  };
+  const v = pipeline();
+  if (pos < toks.length) throw new TplError(`unexpected "${typeof toks[pos] === "string" ? toks[pos] : toks[pos].str}" in operand`);
+  return v;
+}
+function renderTpl(tpl, ctx, file) {
+  let out = "", i = 0;
+  while (i < tpl.length) {
+    const open = tpl.indexOf("{{", i);
+    if (open < 0) { out += tpl.slice(i); break; }
+    let text = tpl.slice(i, open);
+    const close = tpl.indexOf("}}", open);
+    if (close < 0) throw new Error(`parse error at (${file}): unclosed action`);
+    let inner = tpl.slice(open + 2, close);
+    const trimL = inner.startsWith("- "), trimR = inner.endsWith(" -");
+    if (trimL) { text = text.replace(/\s+$/, ""); inner = inner.slice(2); }
+    if (trimR) inner = inner.slice(0, -2);
+    out += text;
+    const line = tpl.slice(0, open).split("\n").length, col = open - tpl.lastIndexOf("\n", open - 1);
+    inner = inner.trim();
+    if (!/^\/\*[\s\S]*\*\/$/.test(inner)) {
+      try { out += goStr(evalPipeline(inner, ctx)); }
+      catch (e) { if (e instanceof TplError) throw new Error(e.parse ? `parse error at (${file}:${line}): ${e.message}` : e.required ? `execution error at (${file}:${line}:${col}): ${e.message}` : `template: ${file}:${line}:${col}: executing "${file}" at <${inner.slice(0, 40)}>: ${e.message}`); throw e; }
+    }
+    i = close + 2;
+    if (trimR) { const m = tpl.slice(i).match(/^\s*/); i += m[0].length; }
+  }
+  return out;
+}
+
+const PRESETS = {
+  "Basic objects": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  namespace: {{ .Release.Namespace }}
+  chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+  revision: "{{ .Release.Revision }}"
+  drink: {{ .Values.favorite.drink }}`,
+  "Pipelines": `data:
+  drink: {{ .Values.favorite.drink | upper | quote }}
+  food: {{ .Values.favorite.food | default "pizza" | quote }}
+  short: {{ .Values.favorite.drink | repeat 3 | trunc 10 }}
+  secret: {{ .Values.password | b64enc }}`,
+  "required": `spec:
+  host: {{ required "A valid .Values.ingress.host entry is required!" .Values.ingress.host }}`,
+  "toYaml | nindent": `spec:
+  template:
+    spec:
+      nodeSelector: {{- toYaml .Values.nodeSelector | nindent 8 }}
+      containers:
+      - name: app
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"`,
+  "Nil pointer": `data:
+  host: {{ .Values.ingress.tls.secretName }}`
+};
+PRESETS["Whitespace"] = `data:
+  {{- /* a comment renders nothing */}}
+  a: {{ .Values.favorite.drink }}
+  b: {{- .Values.favorite.drink }}
+  c: {{ .Values.favorite.drink -}}
+  end`;
+const VALS = `favorite:
+  drink: coffee
+  food: ""
+password: s3cr3t
+image:
+  repository: ghcr.io/example/web
+  tag: ""
+nodeSelector:
+  kubernetes.io/os: linux
+  disktype: ssd
+ingress:
+  host: ""`;
+const pHtml = `
+<div class="sim glass">
+  <div class="ctrl" style="margin:0 0 12px;flex-wrap:wrap" id="pPre"></div>
+  <div class="play">
+    <div><label>templates/configmap.yaml</label><textarea id="pTpl" spellcheck="false"></textarea></div>
+    <div><label>values.yaml (chart defaults)</label><textarea id="pVals" spellcheck="false"></textarea></div>
+    <div class="full row2">
+      <div><label>Release name</label><input class="input" id="pRel" value="web" style="font-family:var(--mono)"></div>
+      <div><label>--set (highest precedence)</label><input class="input" id="pSet" value="" placeholder="favorite.drink=tea,ingress.host=shop.example.com" style="font-family:var(--mono)"></div>
+    </div>
+    <div class="full"><div class="code"><div class="code-head"><span>helm template web ./mychart</span></div><pre class="out" id="pOut"></pre></div></div>
+  </div>
+</div>`;
+function initPlay(el) {
+  const $ = s => el.querySelector(s);
+  $("#pPre").innerHTML = Object.keys(PRESETS).map((k, i) => `<button class="btn small ${i ? "" : "primary"}" data-p="${k}">${k}</button>`).join("");
+  el.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { el.querySelectorAll("[data-p]").forEach(x => x.classList.toggle("primary", x === b)); $("#pTpl").value = PRESETS[b.dataset.p]; run(); });
+  $("#pTpl").value = PRESETS["Basic objects"]; $("#pVals").value = VALS;
+  const run = () => {
+    try {
+      let values = parseYaml($("#pVals").value);
+      if ($("#pSet").value.trim()) values = deepMerge(values, setPairs($("#pSet").value));
+      const ctx = { Values: values, Release: { Name: $("#pRel").value, Namespace: "default", Revision: 1, IsInstall: true, IsUpgrade: false, Service: "Helm" }, Chart: { Name: "mychart", Version: "0.1.0", AppVersion: "1.16.0" }, Capabilities: { KubeVersion: { Version: "v1.37.0", Major: "1", Minor: "37" } }, Template: { Name: "mychart/templates/configmap.yaml", BasePath: "mychart/templates" } };
+      const out = renderTpl($("#pTpl").value, ctx, "mychart/templates/configmap.yaml");
+      $("#pOut").innerHTML = K8S_HL("---\n# Source: mychart/templates/configmap.yaml\n" + out);
+    } catch (e) {
+      $("#pOut").innerHTML = `<span style="color:var(--red)">Error: ${e.message.replace(/</g, "&lt;")}</span>`;
+    }
+  };
+  ["pTpl", "pVals", "pRel", "pSet"].forEach(i => $("#" + i).oninput = run);
+  run();
+}
+
+K8S_RENDER({
+  id: "helm-templates", group: "templates", minutes: 25,
+  title: 'Templates: <span class="grad-text">objects, values & functions</span>',
+  lead: "Helm templates are Go templates plus the Sprig function library and a few Helm extras. Everything between <code>{{ }}</code> is an action; everything else is copied as-is. Edit the playground and watch the output.",
+  parts: [["Playground", "Render templates live"], ["Built-in objects", "Release, Values, Chart…"], ["Values precedence", "Where values come from"], ["Functions & pipelines", "default, quote, required"]],
+  sections: [
+    { id: "play", title: "Template playground", toc: "Playground",
+      lead: "This is a small teaching engine, not Helm itself: it supports value lookups, pipelines and common functions. Try a preset, then break something.",
+      blocks: [{ type: "custom", html: pHtml, init: initPlay },
+        { type: "callout", kind: "tip", html: "Try: the <b>required</b> preset, then add <code>ingress.host=shop.example.com</code> to --set. In <b>Nil pointer</b>, see why <code>.Values.ingress.tls.secretName</code> fails when <code>tls</code> is missing, and how <code>{{ with }}</code> or <code>dig</code> avoid it (next topic)." }] },
+    { id: "objects", title: "Built-in objects", toc: "Built-in objects",
+      lead: "Templates start with the top-level object <code>.</code>. Built-in names start with a capital letter.",
+      blocks: [
+        { type: "table", head: ["Object", "Examples"], rows: [
+          ["<code>.Release</code>", "<code>.Name</code>, <code>.Namespace</code>, <code>.Revision</code> (1 on install), <code>.IsInstall</code>, <code>.IsUpgrade</code> (true for upgrade and rollback), <code>.Service</code> (always Helm)"],
+          ["<code>.Values</code>", "Merged values from values.yaml, parent charts, -f files and --set"],
+          ["<code>.Chart</code>", "Chart.yaml contents: <code>.Chart.Name</code>, <code>.Chart.Version</code>, <code>.Chart.AppVersion</code>"],
+          ["<code>.Subcharts</code>", "A subchart's scope from the parent: <code>.Subcharts.postgresql.Values</code>"],
+          ["<code>.Files</code>", "Non-template files: <code>.Files.Get</code>, <code>.Glob</code>, <code>.Lines</code>, <code>.AsConfig</code>, <code>.AsSecrets</code>"],
+          ["<code>.Capabilities</code>", "<code>.KubeVersion</code>, <code>.APIVersions.Has \"batch/v1\"</code>, <code>.HelmVersion</code>"],
+          ["<code>.Template</code>", "<code>.Name</code> (e.g. mychart/templates/cm.yaml), <code>.BasePath</code>"]
+        ] }
+      ] },
+    { id: "precedence", title: "Where values come from", toc: "Values precedence",
+      blocks: [
+        { type: "layers", items: [
+          ["--set / --set-string / --set-file / --set-json", "highest: command-line overrides", "#f472b6"],
+          ["-f custom.yaml (rightmost file wins)", "user-supplied values files", "#a78bfa"],
+          ["parent chart's values.yaml", "only for subcharts: the block under the subchart's name", "#38bdf8"],
+          ["chart's values.yaml", "lowest: the defaults", "#7aa2ff"]
+        ] },
+        { type: "callout", kind: "info", html: "To delete a default key, set it to <code>null</code> in an override: <code>--set livenessProbe.httpGet=null</code>. Helm 4 also accepts multi-document values files, merged in order." }
+      ] },
+    { id: "funcs", title: "Functions and pipelines", toc: "Functions & pipelines",
+      lead: "<code>a | f b</code> calls <code>f b a</code>: the piped value becomes the last argument. That's why <code>default</code> reads naturally in a pipeline.",
+      blocks: [
+        { type: "table", head: ["Function", "Use"], rows: [
+          ["<code>quote</code>, <code>squote</code>", "Wrap strings in quotes. Quote string values in YAML so <code>yes</code>, <code>1.10</code> or <code>on</code> stay strings."],
+          ["<code>default \"x\"</code>", "Fallback when the value is empty (\"\", 0, false, nil, empty list or map)"],
+          ["<code>required \"msg\"</code>", "Fail rendering with a message when a value is missing"],
+          ["<code>upper</code>, <code>lower</code>, <code>title</code>, <code>trunc 63</code>, <code>trimSuffix \"-\"</code>", "String helpers from Sprig; <code>trunc 63</code> keeps names within DNS limits"],
+          ["<code>toYaml</code>, <code>nindent N</code>, <code>indent N</code>", "Insert whole value blocks with the right indentation"],
+          ["<code>printf</code>, <code>b64enc</code>, <code>sha256sum</code>, <code>tpl</code>", "Formatting, encoding, checksums, rendering a string as a template"],
+          ["<code>include</code>, <code>lookup</code>, <code>fail</code>", "Helm-specific: call a named template, read live cluster objects, abort"]
+        ] },
+        { type: "callout", kind: "warn", html: "Helm deliberately leaves out <code>env</code> and <code>expandenv</code> so a chart renders the same on every machine." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["{{ }}", "Actions", "Everything else is copied literally."],
+      ["🔤", "Capitalised built-ins", ".Release, .Values, .Chart, .Capabilities, .Files."],
+      ["⚖️", "Precedence", "values.yaml < parent < -f < --set."],
+      ["🔗", "Pipelines", "The piped value is the last argument."],
+      ["🛟", "default / required", "Handle missing values deliberately."],
+      ["✂️", "{{- -}}", "Dashes trim whitespace on that side."]
+    ],
+    cheat: `helm template web ./mychart                     # render locally
+helm template web ./mychart -s templates/cm.yaml  # one file
+helm template web ./mychart --set favorite.drink=tea --debug
+helm install web ./mychart --dry-run=server     # render + validate on the API server
+helm get values web --all                       # merged values of a release`,
+    quiz: [
+      ["What does {{ .Values.x | default \"a\" }} call?", ["default .Values.x \"a\"", "default \"a\" .Values.x", "x.default(a)", "An error"], 1, "The piped value is appended as the last argument."],
+      ["What is .Release.Revision on the first install?", ["0", "1", "Empty", "The chart version"], 1, "It increments with each upgrade and rollback."],
+      ["Why quote string values like {{ .Values.tag | quote }}?", ["Speed", "So YAML doesn't reinterpret values like 1.10 or yes", "Required by Helm", "To base64 them"], 1, "YAML would read 1.10 as the number 1.1."],
+      ["What does {{- do?", ["Comments", "Trims whitespace before the action", "Negates a value", "Escapes output"], 1, "A dash on the right trims whitespace after."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What is Helm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Without Helm vs with Helm: how many files and commands it takes to ship an app to three environments.
+const cHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>Kubernetes manifests in the app: <b id="mV">8</b><input class="input" type="range" min="2" max="30" value="8" id="m"></label>
+    <label>Environments (dev, staging, prod…): <b id="eV">3</b><input class="input" type="range" min="1" max="6" value="3" id="e"></label>
+  </div>
+  <div class="compare" style="grid-template-columns:1fr 1fr">
+    <div class="cmp glass" style="--c:var(--red)"><span class="chip red">plain YAML</span><h4 id="rawN"></h4><ul id="raw"></ul></div>
+    <div class="cmp glass" style="--c:var(--green)"><span class="chip green">Helm chart</span><h4 id="helmN"></h4><ul id="helm"></ul></div>
+  </div>
+</div>`;
+function initCompare(el) {
+  const $ = s => el.querySelector(s);
+  const draw = () => {
+    const m = +$("#m").value, e = +$("#e").value;
+    $("#mV").textContent = m; $("#eV").textContent = e;
+    $("#rawN").textContent = `${m * e} YAML files to maintain`;
+    $("#raw").innerHTML = [`${m} manifests copied per environment, kept in sync by hand`, `Deploy: ${m * e} <code>kubectl apply</code> targets, in the right order`, "Rollback: find and re-apply the old files yourself", "No record in the cluster of what version is running"].map(x => `<li>${x}</li>`).join("");
+    $("#helmN").textContent = `${m} templates + ${e} values file${e > 1 ? "s" : ""}`;
+    $("#helm").innerHTML = [`One chart; each environment is a small values file`, `Deploy: <code>helm upgrade --install app ./chart -f ${e > 1 ? "prod" : "values"}.yaml</code>`, "Rollback: <code>helm rollback app 3</code>", "Every revision stored in the cluster: <code>helm history app</code>"].map(x => `<li>${x}</li>`).join("");
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = draw);
+  draw();
+}
+
+K8S_RENDER({
+  id: "helm-intro", group: "intro", minutes: 15,
+  title: 'What is <span class="grad-text">Helm</span>?',
+  lead: "Helm is the package manager for Kubernetes. It bundles the manifests an application needs into a versioned chart, installs it as a release, and lets you upgrade or roll it back as one unit.",
+  parts: [["Why Helm", "The YAML sprawl problem"], ["Three concepts", "Chart, repository, release"], ["Architecture", "Client, library, API server"], ["Helm 4", "What changed in v4"]],
+  sections: [
+    { id: "why", title: "Why a package manager?", toc: "Why Helm",
+      lead: "One app is usually a Deployment, a Service, a ConfigMap, a Secret, an Ingress and more. Multiply by environments and versions and plain YAML gets repetitive and error prone.",
+      blocks: [{ type: "custom", html: cHtml, init: initCompare },
+        { type: "cards", cols: 3, items: [
+          ["📥", "Install off-the-shelf apps", "Databases, monitoring stacks and ingress controllers from a chart instead of hand-written manifests."],
+          ["🌍", "Configure per environment", "Same chart, different values for dev, staging and prod."],
+          ["⏪", "Upgrade and roll back", "Each change is a numbered revision you can return to."]
+        ] }] },
+    { id: "concepts", title: "Chart, repository, release", toc: "Three concepts",
+      lead: "Helm installs charts into Kubernetes, creating a new release for each installation. You find charts by searching repositories.",
+      blocks: [
+        { type: "flow", nodes: [
+          ["🗄️", "Repository", "Repository: where charts are shared", "Like CPAN or a distro package archive. Either an HTTP server with an index.yaml or an OCI registry. Artifact Hub lists public charts from many repositories."],
+          ["📦", "Chart", "Chart: the package", "A folder (or .tgz) with templates, default values and metadata. The Kubernetes equivalent of a Homebrew formula, a .deb or an RPM."],
+          ["⚙️", "Values", "Values: your configuration", "values.yaml in the chart supplies defaults; -f files and --set override them at install time."],
+          ["🚀", "Release", "Release: a running instance", "Chart + values installed under a name. Install the same MySQL chart twice and you get two releases, each tracked separately."]
+        ] },
+        { type: "callout", kind: "tip", html: "A chart has two versions: <code>version</code> is the chart's own SemVer, <code>appVersion</code> is the version of the software it deploys. They change independently." }
+      ] },
+    { id: "arch", title: "How Helm works", toc: "Architecture",
+      lead: "Helm is just a client. There is no server component in the cluster.",
+      blocks: [
+        { type: "layers", items: [
+          ["helm CLI (client)", "chart development, repositories, release commands", "#7aa2ff"],
+          ["Helm library (Go SDK)", "renders templates, computes changes, manages releases; reusable by other tools", "#a78bfa"],
+          ["Kubernetes API server", "Helm talks to it with client-go using your kubeconfig and RBAC", "#326ce5"],
+          ["Release Secrets", "one Secret per revision in the release namespace: type helm.sh/release.v1", "#34d399"]
+        ] },
+        { type: "term", title: "release state lives in the cluster", lines: [
+          "$ kubectl get secrets -l owner=helm",
+          "NAME                          TYPE                 DATA   AGE",
+          "sh.helm.release.v1.web.v1     helm.sh/release.v1   1      2d",
+          "sh.helm.release.v1.web.v2     helm.sh/release.v1   1      3h",
+          "✓ each Secret holds the chart, values and rendered manifest of one revision"
+        ] },
+        { type: "timeline", items: [
+          ["2015", "Helm is born", "Created at Deis and announced at the first KubeCon."],
+          ["2016", "Helm 2", "Adds Tiller, an in-cluster server that installs charts. Powerful, but a security headache."],
+          ["2018", "CNCF", "Helm joins the CNCF; it graduates in 2020."],
+          ["Nov 2019", "Helm 3", "Tiller removed. Helm uses your own credentials; releases stored as Secrets; OCI support starts."],
+          ["Nov 2025", "Helm 4", "Released at KubeCon: Wasm plugins, server-side apply, kstatus waiting, reproducible chart builds."],
+          ["Nov 2026", "Helm 3 end of life", "Bug fixes ended July 8, 2026; security fixes end November 11, 2026. Migrate now."]
+        ] }
+      ] },
+    { id: "v4", title: "What changed in Helm 4", toc: "Helm 4",
+      lead: "Charts keep working: apiVersion v2 charts are unchanged. The changes are in the CLI, plugins and how Helm applies resources.",
+      blocks: [
+        { type: "table", head: ["Area", "Helm 3", "Helm 4"], rows: [
+          ["Applying resources", "Client-side three-way merge", "Server-side apply for new releases; existing releases keep their previous method"],
+          ["Waiting", "<code>--wait</code> polls readiness", "kstatus watcher: <code>--wait</code> = <code>watcher</code>; also <code>hookOnly</code> (default) and <code>legacy</code>"],
+          ["Plugins", "Executables only", "Typed plugins (cli, getter, postrenderer) with optional WebAssembly runtime"],
+          ["Post-renderers", "<code>--post-renderer ./script</code>", "Must be a plugin: <code>--post-renderer &lt;plugin-name&gt;</code>"],
+          ["Flags", "<code>--atomic</code>, <code>--force</code>", "<code>--rollback-on-failure</code>, <code>--force-replace</code> (old names still work with a warning)"],
+          ["OCI", "Install by tag", "Install by digest: <code>oci://…/app@sha256:…</code>"],
+          ["Registry login", "Full URL accepted", "Domain name only: <code>helm registry login registry.example.com</code>"],
+          ["Values", "One YAML doc per file", "Multi-document values files"],
+          ["Charts", "apiVersion v2", "v2 unchanged; experimental v3 behind <code>HELM_EXPERIMENTAL_CHART_V3=1</code>"]
+        ] },
+        { type: "callout", kind: "warn", html: "Before upgrading CI to Helm 4, search your scripts for <code>--atomic</code>, <code>--force</code>, <code>--post-renderer</code> pointing at a file, and <code>helm registry login https://…</code>." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📦", "Chart", "A versioned package of templates and default values."],
+      ["🗄️", "Repository", "HTTP index or OCI registry where charts are shared."],
+      ["🚀", "Release", "A named install of a chart; every change is a revision."],
+      ["🔐", "No server", "Helm uses your kubeconfig and RBAC; state lives in Secrets."],
+      ["4️⃣", "Helm 4", "Server-side apply, kstatus waits, typed Wasm plugins."],
+      ["⏳", "Helm 3 EOL", "Security fixes end November 11, 2026."]
+    ],
+    cheat: `helm version                       # client + Kubernetes client-go version
+helm search hub nginx              # Artifact Hub
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm install web bitnami/nginx     # creates release "web", revision 1
+helm list -A                       # releases in all namespaces
+kubectl get secrets -l owner=helm  # where release state lives`,
+    quiz: [
+      ["What is a release?", ["A chart version", "An installed instance of a chart", "A repository", "A Git tag"], 1, "Install the same chart twice and you get two releases."],
+      ["Where does Helm 4 store release history by default?", ["Tiller", "A local SQLite file", "Secrets in the release namespace", "etcd directly"], 2, "HELM_DRIVER can switch this to configmap or sql."],
+      ["What replaced --atomic in Helm 4?", ["--wait", "--rollback-on-failure", "--force-replace", "--cleanup-on-fail"], 1, "--atomic still works but warns."],
+      ["Do Helm 3 charts (apiVersion v2) work with Helm 4?", ["No, rewrite needed", "Yes, unchanged", "Only with a plugin", "Only via OCI"], 1, "Chart v3 is a separate, experimental format."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

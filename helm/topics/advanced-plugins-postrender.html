@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helm 4 Plugins</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// plugin.yaml builder for the three Helm 4 plugin types and two runtimes.
+const pHtml = `
+<div class="sim glass">
+  <div class="sim-row" style="flex-wrap:wrap">
+    <label>type<select class="input" id="pType"><option>cli/v1</option><option>getter/v1</option><option>postrenderer/v1</option></select></label>
+    <label>runtime<select class="input" id="pRun"><option>subprocess</option><option>extism/v1</option></select></label>
+    <label>name<input class="input" id="pName" value="kustomize-render" style="font-family:var(--mono)"></label>
+  </div>
+  <div class="code"><div class="code-head"><span>plugin.yaml</span><button class="copy">Copy</button></div><pre id="pYaml"></pre></div>
+  <div class="pipe-out" id="pOut"></div>
+</div>`;
+function initPlugin(el) {
+  const $ = s => el.querySelector(s);
+  const draw = () => {
+    const type = $("#pType").value, run = $("#pRun").value, name = $("#pName").value.trim();
+    const config = type === "cli/v1" ? `config:
+  usage: "helm ${name} [flags]"
+  shortHelp: "One-line description for helm help"
+  longHelp: "Longer help text"
+  ignoreFlags: false` : type === "getter/v1" ? `config:
+  protocols: ["s3"]` : "# postrenderer/v1 has no config options";
+    const rc = run === "subprocess" ? `runtimeConfig:
+  platformCommand:
+  - os: linux
+    command: "\${HELM_PLUGIN_DIR}/bin/${name}"
+  - command: "\${HELM_PLUGIN_DIR}/bin/${name}.exe"   # any other OS` : `runtimeConfig:
+  memory:
+    maxPages: 16             # 16 × 64 KiB = 1 MiB (default 4 pages)
+  allowedHosts: []           # no network unless you list hosts`;
+    $("#pYaml").innerHTML = K8S_HL(`apiVersion: v1
+type: ${type}
+name: ${name}
+version: 0.1.0
+runtime: ${run}
+sourceURL: https://github.com/example/${name}
+${config}
+${rc}`);
+    const files = run === "subprocess" ? `${name}/plugin.yaml + your executable (any language)` : `${name}/plugin.yaml + plugin.wasm (compiled with an Extism PDK)`;
+    const use = type === "cli/v1" ? `helm ${name} …` : type === "getter/v1" ? `helm install web s3://bucket/charts/web-1.4.0.tgz` : `helm install web ./chart --post-renderer ${name}`;
+    const bad = !/^[a-zA-Z0-9_-]+$/.test(name);
+    $("#pOut").innerHTML = (bad ? '<span style="color:var(--red)">✗ Plugin names may only contain letters, digits, _ and -.</span><br>' : "") +
+      `<b>Files:</b> ${files}<br><b>Used as:</b> <code>${use}</code><br>` +
+      (run === "subprocess" ? '<span style="color:var(--amber)">Subprocess plugins run with your full user permissions. Read the code first.</span>' : '<span style="color:var(--green)">Wasm plugins run in a sandbox: no files or network beyond what the config allows.</span>');
+    K8S.initCopy(el);
+  };
+  el.querySelectorAll("select,input").forEach(i => i.oninput = i.onchange = draw);
+  draw();
+}
+
+// Server-side apply latching: which apply method does Helm 4 use?
+const sHtml = `
+<div class="sim glass">
+  <div class="sim-row" style="flex-wrap:wrap">
+    <label>Operation<select class="input" id="sOp"><option value="install">helm install (new release)</option><option value="upgrade">helm upgrade</option><option value="rollback">helm rollback</option></select></label>
+    <label>Release's previous method<select class="input" id="sPrev"><option value="csa">client-side (e.g. created by Helm 3)</option><option value="ssa">server-side (created by Helm 4)</option></select></label>
+    <label>--server-side flag<select class="input" id="sFlag"><option value="">(not set)</option><option value="true">--server-side=true</option><option value="false">--server-side=false</option></select></label>
+  </div>
+  <div class="pipe-out" id="sOut"></div>
+</div>`;
+function initSsa(el) {
+  const $ = s => el.querySelector(s);
+  const draw = () => {
+    const op = $("#sOp").value, prev = $("#sPrev").value, flag = $("#sFlag").value;
+    $("#sPrev").disabled = op === "install";
+    let ssa, why;
+    if (flag) { ssa = flag === "true"; why = "the flag was set explicitly"; }
+    else if (op === "install") { ssa = true; why = "new releases default to server-side apply in Helm 4"; }
+    else { ssa = prev === "ssa"; why = "upgrades and rollbacks keep the release's previous method"; }
+    $("#sOut").innerHTML = `<b style="color:${ssa ? "var(--green)" : "var(--amber)"}">${ssa ? "Server-side apply" : "Client-side apply (three-way merge)"}</b>: ${why}.<br><span class="muted">${ssa ? "The API server merges fields and tracks field managers, so conflicts with other controllers are explicit." : "Helm computes a patch from the old manifest, the new manifest and the live object."}</span>`;
+  };
+  el.querySelectorAll("select").forEach(i => i.onchange = draw);
+  draw();
+}
+
+K8S_RENDER({
+  id: "helm-advanced", group: "advanced", minutes: 25,
+  title: 'Helm 4 <span class="grad-text">plugins</span>, post-renderers & advanced',
+  lead: "Helm 4 redesigned plugins into typed, versioned extensions with an optional WebAssembly sandbox, made post-renderers plugins, and switched new releases to server-side apply.",
+  parts: [["Plugin types", "cli, getter, postrenderer"], ["Build a plugin.yaml", "Runtimes and config"], ["Post-rendering", "Patch charts you don't own"], ["Apply & wait", "Server-side apply, kstatus"], ["Ops", "Ownership, storage, RBAC"]],
+  sections: [
+    { id: "types", title: "Plugin types", toc: "Plugin types",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["⌨️", "cli/v1", "Adds <code>helm &lt;name&gt;</code> subcommands that reuse Helm's config, kubeconfig and environment (e.g. helm-diff, helm-secrets)."],
+          ["📥", "getter/v1", "Teaches Helm new URL schemes for charts and plugins, e.g. <code>s3://</code> or <code>gs://</code>."],
+          ["🛠️", "postrenderer/v1", "Edits rendered manifests before they're sent to Kubernetes, e.g. running Kustomize."]
+        ] },
+        { type: "compare", cols: [
+          { title: "subprocess runtime", chip: "any executable", chipClass: "amber", color: "var(--amber)", items: ["Shell, Python, Go, Node…", "Runs with your user's full access", "Legacy Helm 3 plugins keep working until Helm 5"] },
+          { title: "extism/v1 runtime", chip: "Wasm sandbox", chipClass: "green", color: "var(--green)", items: ["Compiled to WebAssembly", "No file or network access unless granted", "Memory capped (default 4 pages = 256 KiB)"] }
+        ] }
+      ] },
+    { id: "build", title: "Build a plugin.yaml", toc: "Build a plugin.yaml",
+      blocks: [{ type: "custom", html: pHtml, init: initPlugin },
+        { type: "term", title: "managing plugins", lines: [
+          "$ helm plugin install https://github.com/databus23/helm-diff",
+          "$ helm plugin list",
+          "NAME   VERSION  TYPE    APIVERSION  PROVENANCE  SOURCE",
+          "diff   …        cli/v1  …           …           https://github.com/databus23/helm-diff",
+          "$ helm plugin verify diff",
+          "$ helm plugin update diff",
+          "✓ helm plugin install --verify checks a signed plugin's provenance before installing"
+        ] }] },
+    { id: "postrender", title: "Post-rendering", toc: "Post-rendering",
+      lead: "A post-renderer receives every rendered manifest on stdin and returns modified manifests on stdout. Use it to patch a community chart without forking it.",
+      blocks: [
+        { type: "flow", nodes: [
+          ["🧩", "Render", "Helm renders the chart", "Templates plus values give the manifests, including hooks."],
+          ["🏷️", "Annotate", "Filenames attached", "Each document gets a temporary <code>postrenderer.helm.sh/postrender-filename</code> annotation so Helm can map output back to templates."],
+          ["🛠️", "Plugin", "Post-renderer plugin runs", "e.g. Kustomize adds a sidecar or a label. Exit non-zero to fail the install."],
+          ["🚀", "Apply", "Helm applies the result", "The modified manifests are what get stored and applied."]
+        ] },
+        { type: "callout", kind: "warn", html: "Helm 4 breaking change: <code>--post-renderer</code> takes a <b>plugin name</b>, not a path to an executable. Helm 4 also sends hooks to the post-renderer by default (Helm 3 didn't). Everyone upgrading a release must use the same post-renderer, or changes will flip back and forth." }
+      ] },
+    { id: "apply", title: "Server-side apply and waiting", toc: "Apply & wait",
+      blocks: [{ type: "custom", html: sHtml, init: initSsa },
+        { type: "table", head: ["--wait value", "Behaviour"], rows: [
+          ["(flag omitted) = <code>hookOnly</code>", "Wait for hooks only; apply release resources and return"],
+          ["<code>--wait</code> = <code>--wait=watcher</code>", "kstatus watcher: understands Deployments, StatefulSets, Jobs and custom resources with standard conditions"],
+          ["<code>--wait=legacy</code>", "The Helm 3 polling logic, for compatibility"],
+          ["<code>--wait=true</code> / <code>false</code>", "Deprecated booleans; map to watcher / hookOnly with a warning"]
+        ] }] },
+    { id: "ops", title: "Ownership, storage and RBAC", toc: "Ops",
+      blocks: [
+        { type: "cards", cols: 3, items: [
+          ["🤝", "--take-ownership", "Adopt resources that exist but aren't owned by the release (e.g. applied by hand), instead of failing with <code>resource already exists and is not owned by this release</code>. Check the dry run first."],
+          ["🗄️", "HELM_DRIVER", "Where release records live: <code>secret</code> (default), <code>configmap</code>, or <code>sql</code> (PostgreSQL) for releases too big for a Secret's 1 MiB."],
+          ["🔐", "RBAC", "Helm has the permissions of your kubeconfig user. Give CI a ServiceAccount bound to a namespaced Role: it needs the chart's resources plus Secrets for release records."]
+        ] },
+        { type: "code", title: "namespace-scoped deployer for CI", code: `apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: shop
+subjects:
+- kind: ServiceAccount
+  name: ci-deployer
+  namespace: shop
+roleRef:
+  kind: ClusterRole
+  name: edit          # built-in: most namespaced resources incl. Secrets, no RBAC changes
+  apiGroup: rbac.authorization.k8s.io` },
+        { type: "callout", kind: "info", html: "Tools built on the Go SDK (Flux helm-controller, Argo CD's Helm support, Terraform's Helm provider) use the same library. Helm 4 made the SDK API stable, with packages versioned under <code>helm.sh/helm/v4</code>." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🔌", "3 plugin types", "cli/v1, getter/v1, postrenderer/v1, apiVersion v1."],
+      ["🧪", "Wasm runtime", "extism/v1: sandboxed, opt-in access."],
+      ["🛠️", "Post-renderers are plugins", "--post-renderer takes a plugin name."],
+      ["🧭", "SSA latching", "New releases use server-side apply; old ones keep their method."],
+      ["⏳", "--wait=watcher", "kstatus-based readiness."],
+      ["🗄️", "HELM_DRIVER", "secret, configmap or sql."]
+    ],
+    cheat: `helm plugin install <url|path|oci://…> [--verify]
+helm plugin list
+helm install web ./chart --post-renderer kustomize-render
+helm upgrade web ./chart --server-side=true --wait --timeout 10m
+helm install web ./chart --take-ownership --dry-run=server
+HELM_DRIVER=configmap helm list`,
+    quiz: [
+      ["In Helm 4, what does --post-renderer accept?", ["A script path", "A plugin name", "A URL", "A Kustomize directory"], 1, "Post-renderers became a plugin type."],
+      ["A release created by Helm 3 is upgraded with Helm 4 and no flags. Which apply method?", ["Server-side", "Client-side", "Replace", "Random"], 1, "Upgrades keep the previous method unless --server-side is set."],
+      ["Which runtime limits a plugin's file and network access?", ["subprocess", "extism/v1 (Wasm)", "both", "neither"], 1, "Subprocess plugins have your full permissions."],
+      ["What does helm install do with no --wait flag in Helm 4?", ["Waits for all resources", "Waits for hooks only", "Never waits", "Waits 5 minutes"], 1, "The default strategy is hookOnly."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

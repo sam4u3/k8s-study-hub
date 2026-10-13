@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Clickable cluster map: each component explains itself.
+const COMP = {
+  api: ["kube-apiserver", "The front door and the only component that talks to etcd. Authenticates, authorises, runs admission, validates and stores objects. Every other component is a client that watches it. Stateless; scale it horizontally behind a load balancer."],
+  etcd: ["etcd", "Consistent, distributed key-value store (Raft). Holds every object under /registry/... Lose etcd without a backup and you lose the cluster. Run 3 or 5 members for quorum."],
+  sched: ["kube-scheduler", "Watches for Pods with no nodeName. Filters nodes that can't fit them, scores the rest, then writes a Binding. It does not start anything itself."],
+  cm: ["kube-controller-manager", "One binary, dozens of control loops: Deployment, ReplicaSet, Node, Job, EndpointSlice, ServiceAccount, CSR signing, garbage collector… Each compares desired vs actual and acts."],
+  ccm: ["cloud-controller-manager", "Cloud-specific loops: create load balancers for Services, set node addresses, attach routes. Absent on bare metal unless you add one."],
+  kubelet: ["kubelet", "Agent on every node. Watches Pods bound to its node, asks the container runtime (CRI) to run them, mounts volumes (CSI), runs probes and reports status. Runs as a systemd service, not a Pod."],
+  proxy: ["kube-proxy", "Programs iptables/IPVS/nftables rules so Service virtual IPs reach Pod IPs. Runs as a DaemonSet. Some CNIs (Cilium) replace it."],
+  cri: ["Container runtime", "containerd or CRI-O, speaking CRI over a gRPC socket. Pulls images and uses runc to create containers."],
+  cni: ["CNI plugin", "Gives each Pod a network namespace interface and IP, and connects Pods across nodes (Flannel, Calico, Cilium)."],
+  dns: ["CoreDNS", "Cluster add-on (Deployment in kube-system) answering service.namespace.svc.cluster.local queries."]
+};
+const mapHtml = `
+<div class="sim glass">
+  <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:16px" class="map2">
+    <div class="box" style="border-color:rgba(139,92,246,.5)">
+      <div class="faint" style="font-size:12px;margin-bottom:10px">🧠 CONTROL PLANE</div>
+      <div style="display:grid;gap:8px">
+        <button class="opt" data-k="api" style="text-align:center;border-color:rgba(91,140,255,.6)">⭐ kube-apiserver</button>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <button class="opt" data-k="etcd">💾 etcd</button><button class="opt" data-k="sched">📍 scheduler</button>
+          <button class="opt" data-k="cm">🔁 controller-manager</button><button class="opt" data-k="ccm">☁️ cloud-controller</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:grid;gap:10px">
+      ${[1, 2].map(n => `<div class="box" style="border-color:rgba(52,211,153,.45)"><div class="faint" style="font-size:12px;margin-bottom:8px">⚙️ WORKER NODE ${n}</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px"><button class="opt" data-k="kubelet">kubelet</button><button class="opt" data-k="proxy">kube-proxy</button><button class="opt" data-k="cri">containerd</button><button class="opt" data-k="cni">CNI</button><button class="opt" data-k="dns">${n === 1 ? "CoreDNS" : "Pods"}</button></div></div>`).join("")}
+    </div>
+  </div>
+  <div class="flow-caption" id="compOut" style="margin-top:14px"></div>
+</div>`;
+function initMap(el) {
+  if (innerWidth < 760) el.querySelector(".map2").style.gridTemplateColumns = "1fr";
+  const out = el.querySelector("#compOut");
+  const show = k => {
+    el.querySelectorAll("[data-k]").forEach(b => b.classList.toggle("right", b.dataset.k === k));
+    out.style.opacity = 0;
+    setTimeout(() => { out.innerHTML = `<h4>${COMP[k][0]}</h4><p>${COMP[k][1]}</p>`; out.style.opacity = 1; }, 120);
+  };
+  el.querySelectorAll("[data-k]").forEach(b => b.onclick = () => show(b.dataset.k));
+  show("api");
+}
+
+K8S_RENDER({
+  id: "arch-components", group: "architecture", minutes: 30,
+  title: 'Kubernetes <span class="grad-text">architecture</span>',
+  lead: "A cluster is a set of independent programs that only cooperate through the API server. Understand who watches what, and every behaviour (and every outage) becomes explainable.",
+  parts: [["Cluster map", "Click every component"], ["The journey", "kubectl → running Pod"], ["Watch & reconcile", "Why nothing calls anything"], ["Inspect it", "Commands on a real cluster"]],
+  sections: [
+    { id: "map", title: "The cluster map", toc: "Cluster map",
+      lead: "Control plane = the brain (decides). Worker nodes = the muscle (runs). Click a component.",
+      blocks: [
+        { type: "custom", html: mapHtml, init: initMap },
+        { type: "callout", kind: "info", html: "Hub-and-spoke: components never talk to each other directly. The scheduler does not call the kubelet; it writes a binding to the API server, and the kubelet sees it through a watch. This is why each component can restart independently." }
+      ] },
+    { id: "journey", title: "Journey of kubectl create deployment", toc: "The journey",
+      lead: "Press play and follow one command until nginx is serving traffic. Seven independent actors, zero direct calls between them.",
+      blocks: [
+        { type: "flow", interval: 3600, nodes: [
+          ["⌨️", "kubectl", "kubectl sends a request", "<code>kubectl create deployment web --image=nginx --replicas=3</code> becomes <code>POST /apis/apps/v1/namespaces/default/deployments</code> with your kubeconfig credentials."],
+          ["🛡️", "API server", "Authenticate, authorise, admit", "The API server checks who you are (certs/tokens), whether RBAC allows <code>create deployments</code>, runs mutating and validating admission, then validates the schema."],
+          ["💾", "etcd", "Persist", "The Deployment object is written to etcd. kubectl gets <code>201 Created</code> and exits. Nothing is running yet."],
+          ["🔁", "Deployment ctrl", "Deployment controller reacts", "Watching Deployments, it sees a new one with no ReplicaSet and creates ReplicaSet <code>web-6d4cf56db6</code>."],
+          ["🔁", "ReplicaSet ctrl", "ReplicaSet controller reacts", "It sees 0 of 3 Pods and creates 3 Pod objects. They have no <code>nodeName</code>: status Pending."],
+          ["📍", "Scheduler", "Scheduler binds", "For each unscheduled Pod: filter nodes (resources, taints, affinity), score them, write a Binding setting <code>nodeName</code>."],
+          ["🤖", "kubelet", "kubelet starts containers", "The kubelet on that node sees a Pod for itself, calls CNI for networking, CSI for volumes, and the CRI runtime to pull nginx and start it."],
+          ["📣", "Status", "Status flows back", "kubelet reports <code>Running</code> and readiness. The EndpointSlice controller adds the Pod IP to matching Services; kube-proxy updates rules. Traffic can arrive."]
+        ] },
+        { type: "term", title: "watch it happen", lines: [
+          "$ kubectl create deployment web --image=nginx --replicas=3",
+          "deployment.apps/web created",
+          "$ kubectl get events --sort-by=.lastTimestamp | tail -8",
+          "Normal  ScalingReplicaSet  deployment/web       Scaled up replica set web-6d4cf56db6 to 3",
+          "Normal  SuccessfulCreate   replicaset/web-6d4…  Created pod: web-6d4cf56db6-7xk2p",
+          "Normal  Scheduled          pod/web-6d4…-7xk2p   Successfully assigned default/web-…-7xk2p to wk1",
+          "Normal  Pulling            pod/web-6d4…-7xk2p   Pulling image \"nginx\"",
+          "Normal  Pulled             pod/web-6d4…-7xk2p   Successfully pulled image \"nginx\"",
+          "Normal  Created            pod/web-6d4…-7xk2p   Created container: nginx",
+          "Normal  Started            pod/web-6d4…-7xk2p   Started container nginx",
+          "✓ each event line is written by a different component"
+        ] }
+      ] },
+    { id: "reconcile", title: "Watch and reconcile", toc: "Reconcile loop",
+      lead: "Every controller follows the same loop. Learn it once and you understand Deployments, Jobs, operators and CRDs.",
+      blocks: [
+        { type: "pipeline", intro: "Simulate what the ReplicaSet controller does when reality drifts from desired state.",
+          stages: [["Watch", "event from API"], ["Read desired", "spec.replicas"], ["Read actual", "matching Pods"], ["Diff", "desired − actual"], ["Act", "create / delete"], ["Update status", "status.replicas"]],
+          scenarios: [
+            { label: "A Pod is deleted", start: "→ event: Pod web-…-7xk2p DELETED", notes: ["watch fires", "desired = 3", "actual = 2", "diff = +1"], out: '<span style="color:var(--green)">✓ created web-…-q8m4d · status.readyReplicas back to 3</span>' },
+            { label: "Scale to 1", start: "→ event: ReplicaSet spec.replicas 3 → 1", notes: ["watch fires", "desired = 1", "actual = 3", "diff = −2"], out: '<span style="color:var(--green)">✓ deleted 2 Pods (newest/unhealthy first) · status.replicas = 1</span>' },
+            { label: "Node dies", start: "→ event: Node wk2 NotReady (node controller taints it, Pods evicted after ~5 min)", notes: ["watch fires", "desired = 3", "actual = 2 running", "diff = +1"], out: '<span style="color:var(--green)">✓ replacement Pod created and scheduled on wk1</span>' },
+            { label: "Already correct", start: "→ periodic resync", path: [0, 1, 2, 3], notes: ["", "desired = 3", "actual = 3", "diff = 0"], out: '<span class="muted">✓ nothing to do: level-triggered, idempotent</span>' }
+          ] },
+        { type: "cards", cols: 3, items: [
+          ["📡", "Watch, don't poll", "Clients open long-lived watch streams. The API server pushes changes with resourceVersions."],
+          ["🎚️", "Level-triggered", "Controllers act on current state, not on the event alone. Missed events heal on the next sync."],
+          ["🗳️", "Leader election", "With 3 control-plane nodes, only one scheduler and controller-manager are active, holding a Lease in kube-system."]
+        ] }
+      ] },
+    { id: "inspect", title: "Inspect the architecture on a real cluster", toc: "Inspect it",
+      blocks: [
+        { type: "term", title: "kubeadm cluster", lines: [
+          "$ kubectl get pods -n kube-system -o wide",
+          "etcd-cp1  kube-apiserver-cp1  kube-controller-manager-cp1  kube-scheduler-cp1",
+          "coredns-…  coredns-…  kube-proxy-…  kube-proxy-…  kube-proxy-…",
+          "$ ls /etc/kubernetes/manifests           # static Pods the kubelet runs directly",
+          "etcd.yaml  kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml",
+          "$ systemctl status kubelet               # kubelet is a service, not a Pod",
+          "$ kubectl get --raw='/readyz?verbose' | tail -3",
+          "$ kubectl get lease -n kube-system        # who is the active scheduler/controller-manager",
+          "$ sudo ETCDCTL_API=3 etcdctl --cacert /etc/kubernetes/pki/etcd/ca.crt --cert /etc/kubernetes/pki/etcd/server.crt --key /etc/kubernetes/pki/etcd/server.key get /registry/deployments/default/web --keys-only",
+          "/registry/deployments/default/web",
+          "✓ objects are literally keys in etcd"
+        ] },
+        { type: "callout", kind: "tip", html: "Static Pods: the kubelet reads <code>/etc/kubernetes/manifests</code> and runs those Pods even when the API server is down. That is how the API server can run as a Pod on the cluster it serves. Edit a file there and the kubelet restarts that component." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["⭐", "API server is the hub", "Only it talks to etcd; everything else watches it."],
+      ["💾", "etcd is the state", "Back it up. 3 or 5 members for quorum."],
+      ["📍", "Scheduler only decides", "It writes nodeName; the kubelet does the running."],
+      ["🔁", "Controllers reconcile", "Watch → diff → act → status, forever, level-triggered."],
+      ["🤖", "kubelet per node", "Drives CRI, CNI, CSI and probes; runs as systemd."],
+      ["📄", "Static Pods", "kubeadm control plane runs from /etc/kubernetes/manifests."]
+    ],
+    cheat: `kubectl get pods -n kube-system -o wide
+kubectl get componentstatuses        # deprecated; use:
+kubectl get --raw='/readyz?verbose'
+kubectl get events -A --sort-by=.lastTimestamp
+kubectl get lease -n kube-system
+ls /etc/kubernetes/manifests
+journalctl -u kubelet -f`,
+    quiz: [
+      ["Which component writes nodeName on a Pod?", ["kubelet", "kube-scheduler", "kube-proxy", "etcd"], 1, "The scheduler creates a Binding that sets spec.nodeName."],
+      ["Which component is the only one that talks to etcd?", ["controller-manager", "kube-apiserver", "kubelet", "CoreDNS"], 1, "All state access goes through the API server."],
+      ["After kubectl create deployment returns, what exists?", ["Running containers", "Only the Deployment object in etcd", "A node", "A Service"], 1, "Controllers, scheduler and kubelets do the rest asynchronously."],
+      ["How does the kubelet learn about a new Pod for its node?", ["The scheduler calls it", "It watches the API server", "SSH from the control plane", "etcd pushes to it"], 1, "Everything is watch-based through the API server."],
+      ["Why can the API server run as a Pod on its own cluster?", ["It's a DaemonSet", "kubelet runs it as a static Pod from a local manifest", "etcd starts it", "It isn't a Pod"], 1, "Static Pods don't need the API server to start."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

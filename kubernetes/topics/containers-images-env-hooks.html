@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Container Environment and Hooks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// imagePullPolicy decision helper
+const pullHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>image reference<select class="input" id="pImg"><option value="nginx">nginx (no tag)</option><option value="nginx:latest">nginx:latest</option><option value="nginx:1.27">nginx:1.27</option><option value="nginx@sha256:3f0c…">nginx@sha256:…</option></select></label>
+    <label>imagePullPolicy<select class="input" id="pPol"><option value="">(unset)</option><option>Always</option><option>IfNotPresent</option><option>Never</option></select></label>
+    <label>Image already on node?<select class="input" id="pHas"><option value="1">yes</option><option value="0">no</option></select></label>
+  </div>
+  <div class="pipe-out" id="pOut"></div>
+</div>`;
+function initPull(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const img = $("#pImg").value, set = $("#pPol").value, has = $("#pHas").value === "1";
+    const latest = img === "nginx" || img.endsWith(":latest");
+    const eff = set || (latest ? "Always" : "IfNotPresent");
+    let r;
+    if (eff === "Always") r = img.includes("@") ? "checks registry; digest matches → uses cached layers (no download if unchanged)" : "contacts the registry every Pod start to resolve the tag; downloads if the digest changed";
+    else if (eff === "IfNotPresent") r = has ? "uses the local image; <b>no registry call</b>. A moved tag is NOT picked up" : "pulls once, then reuses";
+    else r = has ? "uses the local image" : '<span style="color:var(--red)">ErrImageNeverPull: image not present and policy Never</span>';
+    $("#pOut").innerHTML = `effective policy: <b style="color:#fcd34d">${eff}</b>${set ? "" : ` <span class="faint">(defaulted: ${latest ? "tag is latest/omitted → Always" : "specific tag/digest → IfNotPresent"})</span>`}<br>→ ${r}`;
+  };
+  el.querySelectorAll("select").forEach(s => s.onchange = go); go();
+}
+
+// Termination timeline
+const termHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>preStop sleep (s): <b id="psV">5</b><input class="input" type="range" min="0" max="40" value="5" id="ps"></label>
+    <label>app shutdown time after SIGTERM (s): <b id="asV">10</b><input class="input" type="range" min="0" max="60" value="10" id="as"></label>
+    <label>terminationGracePeriodSeconds: <b id="tgV">30</b><input class="input" type="range" min="5" max="60" step="5" value="30" id="tg"></label>
+  </div>
+  <div id="tBar" style="position:relative;height:38px;border-radius:10px;overflow:hidden;background:rgba(255,255,255,.05);margin-bottom:10px"></div>
+  <div class="pipe-out" id="tOut"></div>
+</div>`;
+function initTerm(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const ps = +$("#ps").value, as = +$("#as").value, tg = +$("#tg").value;
+    ["ps", "as", "tg"].forEach(i => $("#" + i + "V").textContent = $("#" + i).value);
+    const total = Math.max(tg, ps + as) + 2, pct = x => x / total * 100;
+    const killed = ps + as > tg;
+    const end = Math.min(ps + as, tg);
+    $("#tBar").innerHTML = `
+      <div style="position:absolute;left:0;width:${pct(Math.min(ps, tg))}%;top:0;bottom:0;background:rgba(251,191,36,.35)" title="preStop"></div>
+      <div style="position:absolute;left:${pct(Math.min(ps, tg))}%;width:${pct(Math.max(0, end - Math.min(ps, tg)))}%;top:0;bottom:0;background:rgba(91,140,255,.4)" title="SIGTERM handling"></div>
+      <div style="position:absolute;left:${pct(tg)}%;top:0;bottom:0;width:2px;background:var(--red)"></div>
+      <span style="position:absolute;left:6px;top:10px;font:11px var(--mono)">preStop</span>
+      <span style="position:absolute;left:${pct(tg) + 1}%;top:10px;font:11px var(--mono);color:#fca5a5">SIGKILL @${tg}s</span>`;
+    $("#tOut").innerHTML = `0s: Pod marked Terminating → removed from Service endpoints (in parallel)<br>0s–${Math.min(ps, tg)}s: preStop hook runs<br>${ps < tg ? `${ps}s: SIGTERM sent to PID 1<br>` : ""}` +
+      (killed ? `<span style="color:var(--red)">✗ ${tg}s: grace period over → SIGKILL. In-flight requests dropped, no clean shutdown. Raise terminationGracePeriodSeconds or speed up shutdown.</span>`
+              : `<span style="color:var(--green)">✓ ${ps + as}s: app exits cleanly, ${tg - ps - as}s to spare</span>`) +
+      (ps === 0 ? `<br><span style="color:var(--amber)">⚠ no preStop delay: SIGTERM can arrive before kube-proxy/LBs stop sending traffic → some 502s during rollouts</span>` : "");
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = go); go();
+}
+
+K8S_RENDER({
+  id: "containers-env", group: "containers", minutes: 25,
+  title: 'Images, environment, <span class="grad-text">hooks</span> & Downward API',
+  lead: "The small container-level settings that decide whether rollouts drop requests, whether a moved image tag is picked up, and how an app learns its own Pod name and limits.",
+  parts: [["Images", "Pull policy, digests, private registries"], ["Environment", "Env vars and Downward API"], ["Lifecycle hooks", "postStart, preStop"], ["Termination", "Graceful shutdown"], ["Static & ephemeral", "Special Pods and debug containers"]],
+  sections: [
+    { id: "images", title: "Images and pull policy", toc: "Images",
+      blocks: [
+        { type: "custom", html: pullHtml, init: initPull },
+        { type: "cards", cols: 3, items: [
+          ["🏷️", "Pin versions", "Use specific tags or digests. <code>:latest</code> makes rollbacks meaningless and forces a registry call every start."],
+          ["🔐", "Private registries", "Per Pod <code>imagePullSecrets</code>, per ServiceAccount (attach once, used by all its Pods), or kubelet credential providers (ECR/GCR/ACR) on nodes."],
+          ["🧱", "Image volumes", "Mount an OCI image as a read-only volume (stable since v1.36): ship models or data separately from the app image."]
+        ] },
+        { type: "callout", kind: "warn", html: "With <code>IfNotPresent</code>, a cached private image can be used by any Pod on that node without credentials. Newer kubelets can re-verify pull credentials for cached images (<code>KubeletEnsureSecretPulledImages</code>, beta since v1.35); in multi-tenant clusters prefer <code>Always</code> or the admission plugin <code>AlwaysPullImages</code>." }
+      ] },
+    { id: "env", title: "Container environment and the Downward API", toc: "Environment",
+      lead: "Every container gets its hostname (= Pod name), env vars you define, and service-discovery env vars for Services that existed when it started. The Downward API exposes Pod facts without calling the API server.",
+      blocks: [
+        { type: "yaml", title: "downward-api.yaml", lines: [
+          ["env:", ""],
+          ["- name: POD_NAME", ""],
+          ["  valueFrom: {fieldRef: {fieldPath: metadata.name}}", "<b>fieldRef</b>: Pod fields. Also <code>metadata.namespace</code>, <code>metadata.uid</code>, <code>spec.nodeName</code>, <code>spec.serviceAccountName</code>, <code>status.podIP</code>, <code>status.hostIP</code>."],
+          ["- name: NODE_NAME", ""],
+          ["  valueFrom: {fieldRef: {fieldPath: spec.nodeName}}", "Useful for logging and for node-local agents."],
+          ["- name: MEM_LIMIT", ""],
+          ["  valueFrom: {resourceFieldRef: {containerName: app, resource: limits.memory, divisor: 1Mi}}", "<b>resourceFieldRef</b>: requests/limits so the app can size its heap or worker count. Divisor sets the unit."],
+          ["- name: GREETING", ""],
+          ["  value: \"Hi $(POD_NAME)\"", "<code>$(VAR)</code> expands variables defined earlier in the list."],
+          ["volumes:", ""],
+          ["- name: podinfo", ""],
+          ["  downwardAPI:", "<b>As files</b>: labels and annotations can only be exposed as files, and files update when they change (env never does)."],
+          ["    items:", ""],
+          ["    - {path: labels, fieldRef: {fieldPath: metadata.labels}}", ""],
+          ["    - {path: annotations, fieldRef: {fieldPath: metadata.annotations}}", ""]
+        ] },
+        { type: "callout", kind: "info", html: "Service env vars like <code>GAME_SERVICE_SERVICE_HOST</code> only exist for Services created <b>before</b> the Pod and in the same namespace. Prefer DNS names. Set <code>enableServiceLinks: false</code> in namespaces with many Services to avoid huge environments." }
+      ] },
+    { id: "hooks", title: "Lifecycle hooks", toc: "Lifecycle hooks",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "postStart", chip: "after create", chipClass: "green", color: "var(--green)", items: ["Runs right after the container is created, <b>in parallel</b> with ENTRYPOINT (no ordering guarantee)", "Container isn't Running until it finishes", "If it fails, the container is killed", "Use: register, warm caches. Prefer init containers for ordering."] },
+          { title: "preStop", chip: "before stop", chipClass: "amber", color: "var(--amber)", items: ["Runs before SIGTERM, <b>blocking</b> it", "Counts against terminationGracePeriodSeconds", "Use: drain connections, deregister, wait for load balancers", "Handlers: exec, httpGet, <code>sleep</code> (stable since v1.34, no shell needed)"] }
+        ] },
+        { type: "code", title: "lifecycle", code: `containers:
+- name: web
+  image: nginx:1.27
+  lifecycle:
+    postStart:
+      exec:
+        command: ["sh", "-c", "echo started > /usr/share/nginx/html/ready"]
+    preStop:
+      sleep:
+        seconds: 5                 # let endpoints/LBs stop routing first
+# terminationGracePeriodSeconds: 30  (Pod-level, default 30)` }
+      ] },
+    { id: "termination", title: "Graceful termination", toc: "Termination",
+      lead: "Deleting a Pod starts two things at once: endpoint removal (so new traffic stops) and the shutdown sequence (preStop → SIGTERM → wait → SIGKILL). The race between them causes most rollout 502s.",
+      blocks: [
+        { type: "custom", html: termHtml, init: initTerm },
+        { type: "cards", cols: 3, items: [
+          ["📡", "Handle SIGTERM", "PID 1 must catch SIGTERM and finish in-flight requests. Shell-form <code>CMD</code> wraps your app in <code>sh</code>, which doesn't forward signals: use exec form."],
+          ["⏳", "Small preStop sleep", "5–10 s preStop sleep closes the race with endpoint propagation."],
+          ["⏱️", "Size the grace period", "preStop + shutdown time must fit in <code>terminationGracePeriodSeconds</code>, or SIGKILL wins."]
+        ] }
+      ] },
+    { id: "special", title: "Static Pods and ephemeral containers", toc: "Static & ephemeral",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Static Pods", chip: "kubelet-managed", chipClass: "violet", color: "var(--violet)", items: ["Manifests in <code>/etc/kubernetes/manifests</code> on a node", "kubelet runs them without the API server; a read-only <b>mirror Pod</b> appears in the API", "How kubeadm runs the control plane", "Can't use ConfigMaps/Secrets/ServiceAccounts"] },
+          { title: "Ephemeral containers", chip: "debugging", chipClass: "blue", color: "var(--k8s-2)", items: ["Added to a <b>running</b> Pod with <code>kubectl debug</code>", "Share namespaces; with <code>--target</code> they see the app's processes", "No ports, probes or resources; never restarted", "Perfect for distroless images with no shell"] }
+        ] },
+        { type: "term", title: "kubectl debug", lines: [
+          "$ kubectl debug -it game-service-7c9f -n gamehub --image=busybox:1.36 --target=game-service",
+          "/ # ps aux             # sees the Flask process",
+          "/ # wget -qO- localhost:8081/metrics | head",
+          "$ kubectl debug game-service-7c9f -it --copy-to=gs-debug --container=game-service -- sh   # copy with a shell",
+          "$ kubectl debug node/wk1 -it --image=ubuntu --profile=sysadmin   # host namespaces, / at /host"
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🏷️", "Pull policy defaults", ":latest or no tag → Always; otherwise IfNotPresent."],
+      ["📇", "Downward API", "Pod name, IPs, labels and limits as env or files."],
+      ["🪝", "postStart/preStop", "preStop blocks SIGTERM; sleep handler is GA."],
+      ["🛑", "Graceful shutdown", "Endpoint removal races SIGTERM; add a short preStop sleep."],
+      ["📄", "Static Pods", "kubelet runs local manifests; mirror Pods in the API."],
+      ["🩺", "Ephemeral containers", "kubectl debug into running Pods."]
+    ],
+    cheat: `kubectl get pod p -o jsonpath='{.spec.containers[*].imagePullPolicy}'
+kubectl create secret docker-registry regcred --docker-server=… --docker-username=… --docker-password=…
+kubectl patch sa default -p '{"imagePullSecrets":[{"name":"regcred"}]}'
+kubectl exec p -- env | sort
+kubectl debug -it p --image=busybox:1.36 --target=<container>
+kubectl delete pod p --grace-period=60`,
+    quiz: [
+      ["Image nginx:1.27 with no imagePullPolicy. Effective policy?", ["Always", "IfNotPresent", "Never", "Depends on node"], 1, "Specific tags default to IfNotPresent."],
+      ["How can an app read its Pod's labels?", ["Env var via fieldRef", "Downward API volume file", "They can't", "From /etc/hosts"], 1, "Labels and annotations are only available as files."],
+      ["preStop takes 20 s, app needs 15 s after SIGTERM, grace period 30 s. Result?", ["Clean exit", "SIGKILL at 30 s", "preStop skipped", "Pod restarts"], 1, "20 + 15 = 35 > 30."],
+      ["Debug a distroless container that has no shell?", ["kubectl exec sh", "kubectl debug with an ephemeral container and --target", "SSH to node", "Rebuild image"], 1, "Ephemeral containers bring their own tools."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

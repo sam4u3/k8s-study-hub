@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow Control & Named Templates</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .two .code { min-width: 0; }
+  @media (max-width: 700px) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Ingress builder: if / with / range over values, rendered the way Helm would for this one template.
+const ING_TPL = `{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "web.fullname" . }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.tls }}
+  tls:
+  - hosts:
+    {{- range .Values.ingress.hosts }}
+    - {{ . | quote }}
+    {{- end }}
+    secretName: {{ $.Release.Name }}-tls
+  {{- end }}
+  rules:
+  {{- range $i, $host := .Values.ingress.hosts }}
+  - host: {{ $host | quote }}   # rule {{ $i }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ include "web.fullname" $ }}
+            port:
+              number: 80
+  {{- end }}
+{{- end }}`;
+const iHtml = `
+<div class="sim glass">
+  <div class="sim-row" style="flex-wrap:wrap">
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="iOn" checked> ingress.enabled</label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="iTls"> ingress.tls</label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="iAnn" checked> ingress.annotations set</label>
+    <label>ingress.hosts (comma separated)<input class="input" id="iHosts" value="shop.example.com,api.example.com" style="font-family:var(--mono)"></label>
+  </div>
+  <div class="two">
+    <div class="code"><div class="code-head"><span>templates/ingress.yaml</span></div><pre id="iTpl"></pre></div>
+    <div class="code"><div class="code-head"><span>rendered (release "web")</span></div><pre id="iOut"></pre></div>
+  </div>
+</div>`;
+function renderIngress(on, tls, ann, hosts) {
+  if (!on) return "# (nothing: the whole file is inside if .Values.ingress.enabled)";
+  const L = ["apiVersion: networking.k8s.io/v1", "kind: Ingress", "metadata:", "  name: web-mychart"];
+  if (ann) L.push("  annotations:", "    cert-manager.io/cluster-issuer: letsencrypt");
+  L.push("spec:");
+  if (tls) { L.push("  tls:", "  - hosts:"); hosts.forEach(h => L.push(`    - "${h}"`)); L.push("    secretName: web-tls"); }
+  L.push("  rules:");
+  hosts.forEach((h, i) => L.push(`  - host: "${h}"   # rule ${i}`, "    http:", "      paths:", "      - path: /", "        pathType: Prefix", "        backend:", "          service:", "            name: web-mychart", "            port:", "              number: 80"));
+  return L.join("\n");
+}
+function initIngress(el) {
+  const $ = s => el.querySelector(s);
+  $("#iTpl").innerHTML = K8S_HL(ING_TPL);
+  const draw = () => {
+    const hosts = $("#iHosts").value.split(",").map(x => x.trim()).filter(Boolean);
+    $("#iOut").innerHTML = K8S_HL(renderIngress($("#iOn").checked, $("#iTls").checked, $("#iAnn").checked, hosts));
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = i.onchange = draw);
+  draw();
+}
+
+K8S_RENDER({
+  id: "helm-templates-flow", group: "templates", minutes: 25,
+  title: 'Templates: <span class="grad-text">flow control & named templates</span>',
+  lead: "Real charts branch on values, loop over lists, reuse snippets and read files. This topic covers if/with/range, variables, define/include, Files, NOTES.txt, lookup, and how to debug all of it.",
+  parts: [["Flow control", "if, with, range, scope"], ["Named templates", "define, include, nindent"], ["Files, NOTES, lookup", "Beyond values"], ["Debugging", "lint, template, dry-run"]],
+  sections: [
+    { id: "flow", title: "if, with and range", toc: "Flow control",
+      lead: "Toggle the values and watch the Ingress change. Inside <code>with</code> and <code>range</code>, the dot <code>.</code> changes to the current item, so use <code>$</code> to reach the top-level scope.",
+      blocks: [{ type: "custom", html: iHtml, init: initIngress },
+        { type: "table", head: ["Action", "Meaning"], rows: [
+          ["<code>if</code> / <code>else if</code> / <code>else</code>", "False when the value is false, 0, \"\", nil, or an empty list/map"],
+          ["<code>with .Values.x</code>", "Runs only if x is non-empty, and sets <code>.</code> to x inside the block"],
+          ["<code>range .Values.list</code>", "Loops; <code>.</code> is each element. <code>range $i, $v := …</code> names index and value; maps give key and value in sorted key order"],
+          ["<code>$var := …</code>, <code>$var = …</code>", "Declare and reassign variables; scoped to the block they're in"],
+          ["<code>$</code>", "Always the root context, so <code>$.Release.Name</code> works inside loops"],
+          ["<code>and</code>, <code>or</code>, <code>not</code>, <code>eq</code>, <code>ne</code>, <code>lt</code>, <code>gt</code>", "Comparison and boolean functions: <code>if and .Values.a (eq .Values.b \"x\")</code>"]
+        ] },
+        { type: "callout", kind: "tip", html: "Avoid nil-pointer errors on deep paths: wrap in <code>with</code>, or use <code>dig \"tls\" \"secretName\" \"\" .Values.ingress</code> on a map." }] },
+    { id: "named", title: "Named templates", toc: "Named templates",
+      lead: "<code>define</code> creates a reusable snippet, usually in <code>_helpers.tpl</code>. Names are global across the chart and its subcharts, so prefix them with the chart name.",
+      blocks: [
+        { type: "custom", html: `<div class="two"><div class="code reveal in"><div class="code-head"><span>templates/_helpers.tpl</span></div><pre>${K8S_HL(`{{- define "web.labels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- end }}`)}</pre></div><div class="code reveal in"><div class="code-head"><span>templates/service.yaml</span></div><pre>${K8S_HL(`metadata:
+  name: {{ include "web.fullname" . }}
+  labels:
+    {{- include "web.labels" . | nindent 4 }}`)}</pre></div></div>` },
+        { type: "compare", cols: [
+          { title: "include (use this)", chip: "function", chipClass: "green", color: "var(--green)", items: ["Returns a string, so you can pipe it: <code>include \"web.labels\" . | nindent 4</code>", "Indentation always right"] },
+          { title: "template (avoid)", chip: "action", chipClass: "amber", color: "var(--amber)", items: ["Writes output directly; can't be piped", "Indentation is whatever the define had"] }
+        ] },
+        { type: "callout", kind: "warn", html: "Always pass a scope: <code>include \"web.labels\" .</code>. Without the dot, <code>.Chart</code> and <code>.Release</code> are empty inside the template." }
+      ] },
+    { id: "files", title: "Files, NOTES.txt and lookup", toc: "Files, NOTES, lookup",
+      blocks: [
+        { type: "tabs", tabs: [
+          { label: ".Files", blocks: [{ type: "code", title: "configmap from files in the chart", code: `data:
+  app.conf: |-
+{{ .Files.Get "config/app.conf" | indent 4 }}
+{{ (.Files.Glob "config/*.properties").AsConfig | indent 2 }}
+---
+# a Secret from files, base64-encoded for you
+data:
+{{ (.Files.Glob "certs/*").AsSecrets | indent 2 }}` }, { type: "p", html: "Files outside <code>templates/</code> are readable. Files listed in <code>.helmignore</code> aren't packaged, so they can't be read. Charts have a size limit, so don't ship large files." }] },
+          { label: "NOTES.txt", blocks: [{ type: "code", title: "templates/NOTES.txt", code: `Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+{{- if .Values.ingress.enabled }}
+Visit: http{{ if .Values.ingress.tls }}s{{ end }}://{{ index .Values.ingress.hosts 0 }}
+{{- else }}
+Run: kubectl port-forward svc/{{ include "web.fullname" . }} 8080:80
+{{- end }}` }, { type: "p", html: "Rendered like any template and printed after install/upgrade and by <code>helm status</code>. Subchart NOTES aren't shown." }] },
+          { label: "lookup", blocks: [{ type: "code", title: "reuse an existing Secret instead of regenerating it", code: `{{- $existing := lookup "v1" "Secret" .Release.Namespace "web-db" }}
+{{- $pw := "" }}
+{{- if $existing }}
+{{- $pw = index $existing.data "password" }}
+{{- else }}
+{{- $pw = randAlphaNum 24 | b64enc }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: web-db
+data:
+  password: {{ $pw }}` }, { type: "callout", kind: "warn", html: "<code>lookup</code> returns an empty map during <code>helm template</code> and <code>--dry-run=client</code>, because nothing talks to the cluster. Use <code>--dry-run=server</code> to test it." }] }
+        ] }
+      ] },
+    { id: "debug", title: "Debugging templates", toc: "Debugging",
+      lead: "Each tool catches a different class of mistake. Pick a bug and see which step finds it first.",
+      blocks: [
+        { type: "pipeline", intro: "Run the checks in order, from cheapest to closest to the real cluster.",
+          stages: [["helm lint", "chart structure, best practices"], ["helm template", "render locally"], ["--debug", "show the broken output"], ["--dry-run=server", "API server validation"], ["helm install", "real cluster"]],
+          scenarios: [
+            { label: "Typo: {{ .Values.x | uper }}", path: [0], fail: 0, out: '<span style="color:var(--red)">[ERROR] templates/cm.yaml: parse error at (web/templates/cm.yaml:3): function "uper" not defined</span>' },
+            { label: "Bad indentation", path: [0], fail: 0, out: '<span style="color:var(--red)">[ERROR] templates/cm.yaml: unable to parse YAML: error converting YAML to JSON: yaml: line 5: mapping values are not allowed in this context</span><br><span class="muted">Run helm template --debug to print the rendered file, find line 5, fix the nindent.</span>' },
+            { label: "Old API version", path: [0, 1, 2, 3], fail: 3, notes: ["", "renders fine", "renders fine"], out: '<span style="color:var(--red)">Error: resource mapping not found for name: "web" namespace: "" from "": no matches for kind "Ingress" in version "extensions/v1beta1"</span>' },
+            { label: "Correct chart", notes: ["1 chart(s) linted, 0 chart(s) failed", "manifests rendered", "", "server-side validation passed"], out: '<span style="color:var(--green)">✓ STATUS: deployed</span>' }
+          ] },
+        { type: "callout", kind: "tip", html: "Comment out a broken section and print it instead: <code>{{/* … */}}</code>, or <code>{{ toYaml .Values | fail }}</code> temporarily to dump all values." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🔀", "if / with / range", "Empty values are false; with and range change the dot."],
+      ["💲", "$ is root", "Reach .Release and .Values inside loops."],
+      ["🧩", "define + include", "Prefix names; pipe include into nindent."],
+      ["📁", ".Files", "Read and embed non-template chart files."],
+      ["🔎", "lookup", "Reads the cluster; empty during helm template."],
+      ["🐞", "Debug ladder", "lint → template → --debug → --dry-run=server."]
+    ],
+    cheat: `helm lint ./web --strict --with-subcharts
+helm template web ./web --debug
+helm template web ./web -s templates/ingress.yaml --set ingress.enabled=true
+helm install web ./web --dry-run=server --debug
+helm get manifest web | less`,
+    quiz: [
+      ["Inside {{ range .Values.hosts }}, how do you get the release name?", [".Release.Name", "$.Release.Name", "..Release.Name", "root.Release.Name"], 1, "$ always points to the root context."],
+      ["Why prefer include over template?", ["It's faster", "Its output can be piped (e.g. to nindent)", "It caches", "template is removed"], 1, "template is an action and can't be piped."],
+      ["What does lookup return during helm template?", ["The live object", "An empty map", "An error", "The last release's value"], 1, "helm template doesn't contact the cluster."],
+      ["Which step first catches extensions/v1beta1 Ingress on a 1.37 cluster?", ["helm lint", "helm template", "--dry-run=server", "Never"], 2, "Only the API server knows which APIs it serves."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

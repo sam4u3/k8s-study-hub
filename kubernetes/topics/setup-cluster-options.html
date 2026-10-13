@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self-Managed vs Managed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+const respHtml = `
+<div class="sim glass">
+  <div class="sim-row"><label>Cluster type<select class="input" id="ctype">
+    <option value="self">Self-managed (kubeadm on VMs)</option>
+    <option value="managed" selected>Managed (SKS / EKS / GKE / AKS)</option>
+    <option value="auto">Fully managed nodes (GKE Autopilot / EKS Auto Mode)</option>
+    <option value="local">Local (kind / minikube / k3d)</option></select></label></div>
+  <div id="resp" style="display:grid;gap:8px"></div>
+</div>`;
+const RESP = [
+  ["Hardware, network, data centre", ["you", "cloud", "cloud", "laptop"]],
+  ["Control plane VMs + OS patching", ["you", "cloud", "cloud", "tool"]],
+  ["etcd backups and HA", ["you", "cloud", "cloud", "none"]],
+  ["kube-apiserver / scheduler upgrades", ["you", "cloud (you click)", "cloud", "tool"]],
+  ["Worker node OS + kubelet upgrades", ["you", "you (node pools)", "cloud", "tool"]],
+  ["CNI / CSI / CoreDNS add-ons", ["you", "shared", "cloud", "tool"]],
+  ["RBAC, namespaces, policies", ["you", "you", "you", "you"]],
+  ["Your apps, images, data", ["you", "you", "you", "you"]]
+];
+function initResp(el) {
+  const sel = el.querySelector("#ctype"), box = el.querySelector("#resp");
+  const idx = { self: 0, managed: 1, auto: 2, local: 3 };
+  const draw = () => {
+    const k = idx[sel.value];
+    box.innerHTML = RESP.map(([what, who], i) => {
+      const w = who[k], you = w.startsWith("you");
+      return `<div class="box fadein" style="display:flex;justify-content:space-between;gap:10px;animation-delay:${i * 60}ms"><span>${what}</span><span class="pill ${you ? "a" : w === "none" ? "r" : "g"}">${you ? "👤 " : w === "none" ? "— " : "☁️ "}${w}</span></div>`;
+    }).join("");
+  };
+  sel.onchange = draw; draw();
+}
+
+K8S_RENDER({
+  id: "setup-options", group: "setup", minutes: 20,
+  title: '<span class="grad-text">Self-managed</span> vs <span class="grad-text">managed</span> Kubernetes',
+  lead: "The Kubernetes API is the same everywhere. What changes is who runs the control plane, who patches nodes and who gets paged when etcd is unhappy.",
+  parts: [["Options", "Local, self-managed, managed"], ["Responsibility", "Who owns what"], ["Lab script", "Single-node kubeadm in one go"], ["Managed", "Provider walkthrough"]],
+  sections: [
+    { id: "options", title: "Ways to get a cluster", toc: "Options",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Local", chip: "learning", chipClass: "violet", color: "var(--violet)", items: ["<b>kind</b>: nodes are Docker containers", "<b>minikube</b>: VM or container, many add-ons", "<b>k3d / k3s</b>: lightweight, edge-friendly", "Free, disposable, not for production"] },
+          { title: "Self-managed", chip: "full control", chipClass: "amber", color: "var(--amber)", items: ["<b>kubeadm</b> on VMs or bare metal", "Also: Talos, RKE2, kOps, Kubespray", "You own etcd, upgrades, certificates", "Best way to learn internals (CKA)"] },
+          { title: "Managed", chip: "production default", chipClass: "green", color: "var(--green)", items: ["Exoscale <b>SKS</b>, AWS <b>EKS</b>, Google <b>GKE</b>, Azure <b>AKS</b>", "Provider runs the control plane + etcd", "You manage node pools and workloads", "Integrated load balancers and storage"] }
+        ] },
+        { type: "h3", text: "Who is responsible? Pick a cluster type" },
+        { type: "custom", html: respHtml, init: initResp },
+        { type: "callout", kind: "warn", html: "Managed does not mean 'no ops'. You still own RBAC, network policy, image security, resource requests, upgrades of your add-ons and every workload. Most outages are in that half." }
+      ] },
+    { id: "kubeadm", title: "Self-managed: a single-node lab script", toc: "kubeadm script",
+      lead: "A common lab pattern: install a single-node cluster with one script (pinned here to v1.33). <a href=\"setup-kubeadm.html\">Install with kubeadm</a> explains each step in depth; here is what such a script does and the shortcuts it takes for a lab.",
+      blocks: [
+        { type: "steps", steps: [
+          { title: "Install kube tools (pinned)", where: "Node", why: "Pins exact package versions (<code>1.33.0-1.1</code>) and holds them, so the cluster version is reproducible.", code: "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg\necho 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list\nsudo apt-get update -y\nsudo apt-get install -y kubelet=1.33.0-1.1 kubeadm=1.33.0-1.1 kubectl=1.33.0-1.1\nsudo apt-mark hold kubelet kubeadm kubectl" },
+          { title: "Swap off + kernel modules", where: "Node", why: "Same prerequisites as any kubeadm cluster: swap off, overlay + br_netfilter loaded, bridge and forwarding sysctls on.", code: "sudo sed -i '/ swap / s/^\\(.*\\)$/#\\1/g' /etc/fstab\nsudo swapoff -a\nsudo modprobe overlay && sudo modprobe br_netfilter\n# + /etc/sysctl.d/kubernetes.conf with bridge-nf-call-iptables=1, ip_forward=1\nsudo sysctl --system" },
+          { title: "containerd with systemd cgroups", where: "Node", why: "Installs <code>containerd.io</code> from Docker's apt repo and flips <code>SystemdCgroup = true</code>.", code: "containerd config default | sudo tee /etc/containerd/config.toml > /dev/null\nsudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml\nsudo systemctl restart containerd && sudo systemctl enable containerd" },
+          { title: "kubeadm init", where: "Node", whereClass: "violet", why: "<code>--upload-certs</code> and <code>--control-plane-endpoint</code> prepare for adding more control-plane nodes later. <code>--ignore-preflight-errors=all</code> is a lab shortcut: never use it in production; it hides real problems.", code: "sudo kubeadm init \\\n  --pod-network-cidr=10.244.0.0/16 \\\n  --upload-certs \\\n  --kubernetes-version=v1.33.0 \\\n  --control-plane-endpoint=\"$(hostname)\" \\\n  --cri-socket unix:///run/containerd/containerd.sock" },
+          { title: "Flannel + untaint", where: "Node", whereClass: "violet", why: "Single-node lab: remove the control-plane <code>NoSchedule</code> taint so normal Pods can run on it. The trailing <code>-</code> deletes the taint.", code: "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml\nkubectl taint nodes $(hostname) node-role.kubernetes.io/control-plane:NoSchedule-\nkubectl get nodes" }
+        ] },
+        { type: "callout", kind: "tip", html: "Full explanation of every kubeadm phase, ports and joining workers: <a href=\"setup-kubeadm.html\">Install a cluster with kubeadm</a>." }
+      ] },
+    { id: "managed", title: "Managed: creating an SKS cluster", toc: "Managed (SKS)",
+      lead: "The pattern is the same on every managed offering (EKS, GKE, AKS, Exoscale SKS…): create the cluster (control plane), add a node pool (workers), download a kubeconfig.",
+      blocks: [
+        { type: "flow", nodes: [
+          ["☁️", "Cluster", "Create the control plane", "Choose Kubernetes version, zone and CNI (Calico or Cilium). The provider starts an HA API server and etcd you never SSH into."],
+          ["🖥️", "Node pool", "Add a node pool", "Pick instance type, disk and size (e.g. 3 nodes). Nodes are VMs that join automatically with kubelet configured."],
+          ["🔑", "kubeconfig", "Get credentials", "Download a kubeconfig scoped to a user/group with an expiry. Merge it into ~/.kube/config or point KUBECONFIG at it."],
+          ["✅", "Verify", "Check and use", "<code>kubectl get nodes</code> shows only workers: managed control-plane nodes are hidden from you."]
+        ] },
+        { type: "tabs", tabs: [
+          { label: "Exoscale SKS", blocks: [{ type: "code", title: "exo CLI (per Exoscale SKS quick start)", code: "# security group must allow NodePorts, kubelet (10250) and CNI traffic between nodes: see the SKS quick start\nexo compute sks create gamehub \\\n  --zone ch-gva-2 \\\n  --service-level pro \\\n  --nodepool-name pool \\\n  --nodepool-size 3 \\\n  --nodepool-security-group sks-security-group\n\nexo compute sks kubeconfig gamehub kube-admin \\\n  --zone ch-gva-2 \\\n  --group system:masters > sks.kubeconfig\nexport KUBECONFIG=$PWD/sks.kubeconfig\nkubectl get nodes" }] },
+          { label: "AWS EKS", blocks: [{ type: "code", title: "eksctl", code: "eksctl create cluster --name gamehub --region eu-west-1 --nodes 3\naws eks update-kubeconfig --name gamehub --region eu-west-1\nkubectl get nodes" }] },
+          { label: "Google GKE", blocks: [{ type: "code", title: "gcloud", code: "gcloud container clusters create gamehub --zone europe-west1-b --num-nodes 3\ngcloud container clusters get-credentials gamehub --zone europe-west1-b\nkubectl get nodes" }] },
+          { label: "Azure AKS", blocks: [{ type: "code", title: "az", code: "az aks create -g rg-k8s -n gamehub --node-count 3 --generate-ssh-keys\naz aks get-credentials -g rg-k8s -n gamehub\nkubectl get nodes" }] },
+          { label: "kind (local)", blocks: [{ type: "code", title: "kind", code: "cat <<EOF > kind.yaml\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n- role: worker\n- role: worker\nEOF\nkind create cluster --name gamehub --config kind.yaml\nkubectl get nodes" }] }
+        ] },
+        { type: "callout", kind: "warn", html: "Commands and flags differ by CLI version and region; check your provider's docs before running them. A <code>system:masters</code> kubeconfig is full admin that bypasses RBAC: keep it short-lived and never share it." }
+      ] },
+    { id: "choose", title: "How to choose", toc: "Choose",
+      blocks: [
+        { type: "table", head: ["Situation", "Pick", "Why"], rows: [
+          ["Learning, CKA prep", "kubeadm on 2–3 VMs + kind", "You see and break every component"],
+          ["Production on a public cloud", "Managed (SKS/EKS/GKE/AKS)", "HA control plane and etcd are someone else's pager"],
+          ["On-prem / air-gapped", "Self-managed (kubeadm, RKE2, Talos, OpenShift)", "No provider available"],
+          ["Edge / IoT / tiny VMs", "k3s", "Single binary, low memory"],
+          ["CI pipelines", "kind", "Seconds to create and destroy"]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🔌", "Same API everywhere", "Manifests work on kubeadm, SKS, EKS, GKE, AKS and kind."],
+      ["🧑‍🔧", "Self-managed = you own etcd", "Backups, certificate rotation, upgrades and HA are your job."],
+      ["☁️", "Managed hides the control plane", "kubectl get nodes shows only workers."],
+      ["⚠️", "Lab shortcuts", "Untainting the control plane and --ignore-preflight-errors=all are for labs only."],
+      ["👤", "You always own workloads", "RBAC, requests, images, policies and data stay yours."],
+      ["🧪", "kind for speed", "Disposable multi-node clusters in Docker for tests and CI."]
+    ],
+    cheat: `# local
+kind create cluster --name lab
+# self-managed
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+kubectl taint nodes $(hostname) node-role.kubernetes.io/control-plane:NoSchedule-
+# managed: download kubeconfig, then
+export KUBECONFIG=$PWD/cluster.kubeconfig
+kubectl get nodes -o wide
+kubectl cluster-info`,
+    quiz: [
+      ["In a managed cluster, who backs up etcd?", ["You, with etcdctl", "The provider", "Nobody; etcd is not used", "The kubelet"], 1, "The control plane, including etcd, is operated by the provider."],
+      ["What does kubectl taint nodes cp node-role.kubernetes.io/control-plane:NoSchedule- do?", ["Adds a taint", "Removes the taint so regular Pods can schedule there", "Drains the node", "Deletes the node"], 1, "The trailing minus removes the taint."],
+      ["Why is --ignore-preflight-errors=all risky?", ["It slows init", "It hides real problems like swap on or wrong runtime", "It disables RBAC", "It deletes certificates"], 1, "Preflight checks exist to catch broken prerequisites."],
+      ["Best option to spin up a throwaway 3-node cluster in CI?", ["EKS", "kubeadm on bare metal", "kind", "OpenShift"], 2, "kind runs nodes as containers and starts in seconds."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dependencies & Subcharts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .dep-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0; }
+  .dep { padding: 12px; border-radius: 12px; border: 1px solid var(--border); font-size: 13px; transition: all .3s; min-width: 0; }
+  .dep h5 { margin: 0 0 6px; font: 600 13px var(--mono); }
+  .dep.on { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .dep.off { opacity: .5; }
+  .dep .why { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .scope { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .scope pre { margin: 0; }
+  .scope .code { min-width: 0; }
+  @media (max-width: 700px) { .dep-grid, .scope { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Tags and conditions resolver, following Helm's rules: tags first, then the first condition path that exists wins.
+const DEPS = [
+  { name: "postgresql", condition: ["postgresql.enabled"], tags: ["database"] },
+  { name: "redis", condition: ["redis.enabled", "global.redis.enabled"], tags: ["cache", "database"] },
+  { name: "ui-kit", condition: [], tags: ["front-end"] }
+];
+const KEYS = ["postgresql.enabled", "redis.enabled", "global.redis.enabled", "tags.database", "tags.cache", "tags.front-end"];
+const dHtml = `
+<div class="sim glass">
+  <p class="muted" style="margin:0 0 10px;font-size:14px">Set values in the <b>top-level</b> chart. Each can be unset, true or false.</p>
+  <div class="sim-row" style="flex-wrap:wrap">${KEYS.map(k => `<label>${k}<select class="input" data-k="${k}"><option value="">(unset)</option><option>true</option><option>false</option></select></label>`).join("")}</div>
+  <div class="dep-grid" id="dDeps"></div>
+</div>`;
+function resolveDeps(vals) {
+  return DEPS.map(d => {
+    let on = true, why = "loaded by default (no tag or condition decided)";
+    const set = d.tags.filter(t => vals["tags." + t] !== undefined);
+    if (set.length) {
+      const anyTrue = set.some(t => vals["tags." + t] === true);
+      on = anyTrue;
+      why = anyTrue ? `tag ${set.find(t => vals["tags." + t] === true)}=true enables it` : `all its set tags are false (${set.join(", ")})`;
+    }
+    const path = d.condition.find(p => vals[p] !== undefined);
+    if (path) { on = vals[path]; why = `condition ${path}=${vals[path]} wins over tags`; }
+    return { ...d, on, why };
+  });
+}
+function initDeps(el) {
+  const sels = [...el.querySelectorAll("[data-k]")];
+  const draw = () => {
+    const vals = {};
+    sels.forEach(s => { if (s.value) vals[s.dataset.k] = s.value === "true"; });
+    el.querySelector("#dDeps").innerHTML = resolveDeps(vals).map(d => `<div class="dep glass ${d.on ? "on" : "off"}"><h5>${d.on ? "✓" : "✗"} ${d.name}</h5>condition: <code>${d.condition.join(",") || "none"}</code><br>tags: <code>${d.tags.join(", ")}</code><div class="why">${d.why}</div></div>`).join("");
+  };
+  sels.forEach(s => s.onchange = draw);
+  draw();
+}
+
+// Who sees which values: parent, subchart, and global.
+const SC = {
+  parent: `# web/values.yaml (parent)
+replicaCount: 2
+global:
+  imageRegistry: ghcr.io/example
+postgresql:          # block named after the subchart
+  auth:
+    database: shop`,
+  child: `# charts/postgresql/values.yaml (defaults)
+auth:
+  database: postgres
+  username: app
+primary:
+  persistence:
+    size: 8Gi`,
+  merged: `# .Values inside the postgresql subchart
+auth:
+  database: shop      # overridden by the parent
+  username: app
+primary:
+  persistence:
+    size: 8Gi
+global:
+  imageRegistry: ghcr.io/example   # globals flow down
+# replicaCount is NOT visible: subcharts can't read parent values`
+};
+const sHtml = `<div class="scope">${["parent", "child", "merged"].map(k => `<div class="code reveal in"><div class="code-head"><span>${{ parent: "parent values", child: "subchart defaults", merged: "what the subchart sees" }[k]}</span></div><pre>${K8S_HL(SC[k])}</pre></div>`).join("")}</div>`;
+
+K8S_RENDER({
+  id: "helm-deps", group: "charts", minutes: 20,
+  title: 'Dependencies, <span class="grad-text">subcharts</span> & library charts',
+  lead: "Charts can depend on other charts. Your web app chart can pull in PostgreSQL and Redis, pass them values, and share helpers through a library chart.",
+  parts: [["Declaring dependencies", "Chart.yaml, update, Chart.lock"], ["Tags & conditions", "Turn subcharts on and off"], ["Values scope", "Overrides, globals, import-values"], ["Library charts", "Reusable helpers"]],
+  sections: [
+    { id: "declare", title: "Declaring dependencies", toc: "Declaring dependencies",
+      blocks: [
+        { type: "code", title: "web/Chart.yaml", code: `apiVersion: v2
+name: web
+version: 1.4.0
+dependencies:
+  - name: postgresql
+    version: "~16.0.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+    tags: [database]
+  - name: redis
+    version: "20.x.x"
+    repository: "@bitnami"          # alias of a repo added with helm repo add
+    condition: redis.enabled,global.redis.enabled
+    tags: [cache, database]
+  - name: common
+    version: "2.x.x"
+    repository: "@bitnami"
+    alias: shared                   # install the same chart under another name` },
+        { type: "steps", steps: [
+          { title: "Resolve and download", where: "your machine", why: "Reads Chart.yaml, picks the newest version matching each range, downloads the .tgz files into <code>charts/</code> and writes <code>Chart.lock</code>.", code: "helm dependency update ./web" },
+          { title: "Rebuild from the lock file", where: "CI", whereClass: "green", why: "Uses the exact versions in Chart.lock. Commit Chart.lock; ignore charts/*.tgz in Git if you like.", code: "helm dependency build ./web" },
+          { title: "Check status", where: "your machine", why: "Shows each dependency and whether it is ok, missing or out of date.", code: `helm dependency list ./web
+NAME        VERSION  REPOSITORY                                   STATUS
+postgresql  ~16.0.0  oci://registry-1.docker.io/bitnamicharts     ok` }
+        ] },
+        { type: "callout", kind: "tip", html: "Use version ranges (<code>~16.0.0</code> for patches, <code>^16.0.0</code> for minors) in Chart.yaml and let Chart.lock pin exact versions. The Helm best-practice guide recommends patch-level ranges." }
+      ] },
+    { id: "tags", title: "Tags and conditions", toc: "Tags & conditions",
+      lead: "All dependencies load by default. Tags switch groups of charts; a condition switches one chart and always beats tags. Both are read only from the top-level chart's values.",
+      blocks: [{ type: "custom", html: dHtml, init: initDeps },
+        { type: "callout", kind: "info", html: "Try <code>tags.database=false</code>, then add <code>redis.enabled=true</code>. Redis comes back because its condition wins. A condition lists several paths; only the first one that exists counts." }] },
+    { id: "scope", title: "How values reach subcharts", toc: "Values scope",
+      lead: "A subchart is standalone: it can't read its parent's values. The parent passes values down under a key named after the subchart (or its alias). <code>global</code> is shared with every chart.",
+      blocks: [{ type: "custom", html: sHtml },
+        { type: "cards", cols: 3, items: [
+          ["⬇️", "Parent overrides child", "Values under <code>postgresql:</code> in the parent replace the subchart's defaults."],
+          ["🌍", "Globals go everywhere", "<code>.Values.global.x</code> is the same in the parent and every subchart. It must be declared under <code>global</code>."],
+          ["⬆️", "import-values goes up", "<code>import-values</code> in Chart.yaml copies a child's exported values into the parent's scope."]
+        ] },
+        { type: "p", html: "Parent templates can read a subchart's values with <code>.Subcharts.postgresql.Values</code>, or through <code>.Values.postgresql</code>. Templates are shared across the whole chart tree, so give named templates a chart prefix (<code>web.labels</code>, not <code>labels</code>) to avoid collisions." }] },
+    { id: "library", title: "Library charts", toc: "Library charts",
+      lead: "A library chart (<code>type: library</code>) contains only named templates. Application charts depend on it to share labels, names and whole resource skeletons.",
+      blocks: [
+        { type: "tabs", tabs: [
+          { label: "mylibchart (library)", blocks: [{ type: "code", title: "mylibchart/templates/_configmap.yaml", code: `{{- define "mylibchart.configmap.tpl" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name | printf "%s-%s" .Chart.Name }}
+data: {}
+{{- end -}}
+{{- define "mylibchart.configmap" -}}
+{{- include "mylibchart.util.merge" (append . "mylibchart.configmap.tpl") -}}
+{{- end -}}` }] },
+          { label: "app using it", blocks: [{ type: "code", title: "mychart/templates/configmap.yaml", code: `{{- include "mylibchart.configmap" (list . "mychart.configmap") -}}
+{{- define "mychart.configmap" -}}
+data:
+  myvalue: "Hello World"
+{{- end -}}` }, { type: "code", title: "mychart/Chart.yaml", code: `dependencies:
+  - name: mylibchart
+    version: 0.1.0
+    repository: file://../mylibchart` }] }
+        ] },
+        { type: "callout", kind: "info", html: "<code>helm install</code> on a library chart fails with <code>Error: library charts are not installable</code>. Bitnami's <code>common</code> chart is a widely used example." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📋", "Chart.yaml dependencies", "Ranges in Chart.yaml, exact pins in Chart.lock."],
+      ["🔀", "Conditions beat tags", "Set both in the top-level values."],
+      ["⬇️", "Values flow down", "Parent overrides under the subchart's name."],
+      ["🌍", "global", "The only values every chart shares."],
+      ["🚫", "Subcharts are blind", "They can't read the parent's values."],
+      ["📚", "Library charts", "Share named templates, render nothing."]
+    ],
+    cheat: `helm dependency update ./web     # resolve ranges, write Chart.lock, fill charts/
+helm dependency build ./web      # use Chart.lock exactly
+helm dependency list ./web
+helm template web ./web --set postgresql.enabled=false
+helm template web ./web --set tags.database=false --set redis.enabled=true`,
+    quiz: [
+      ["tags.database=false and redis.enabled=true. Is redis installed?", ["No, tags win", "Yes, the condition wins", "Error", "Only its CRDs"], 1, "A condition that is set always overrides tags."],
+      ["How does a parent set the subchart postgresql's auth.database?", ["global.auth.database", "postgresql.auth.database in parent values", "--set-subchart", "Edit the subchart"], 1, "Use a key named after the subchart (or alias)."],
+      ["Can a subchart template read the parent's .Values.replicaCount?", ["Yes", "No, unless it's under global", "Only in NOTES.txt", "Only with lookup"], 1, "Subcharts only see their own values plus global."],
+      ["Which file pins exact dependency versions?", ["Chart.yaml", "Chart.lock", "requirements.yaml", "index.yaml"], 1, "requirements.yaml was the Helm 2 format."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

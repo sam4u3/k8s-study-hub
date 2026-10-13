@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Users and CSRs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const codeBox = (t, c) => K8S_CODE(t, c);
+
+const FLOW = [
+    ["🔑", "Private key", "1 · Generate a private key", "jane creates <code>jane.key</code> locally. The private key never leaves her machine; that is the whole point of a CSR."],
+    ["📝", "CSR file", "2 · Create a signing request", "<code>openssl req</code> builds <code>jane.csr</code> with subject <code>/CN=jane/O=dev-team</code>. CN becomes the username, O becomes a group."],
+    ["📤", "CSR object", "3 · Submit to Kubernetes", "An admin wraps the base64 CSR in a <code>CertificateSigningRequest</code> with <code>signerName: kubernetes.io/kube-apiserver-client</code> and <code>usages: [client auth]</code>. Status: Pending."],
+    ["✅", "Approve", "4 · Admin approves", "<code>kubectl certificate approve jane</code> adds an Approved condition. Approving requires the <code>approve</code> verb on the signer, so not everyone can do it."],
+    ["🏛️", "Sign (CA)", "5 · Controller signs", "The csrsigning controller in <b>kube-controller-manager</b> signs it with the cluster CA (<code>/etc/kubernetes/pki/ca.key</code>) and writes the cert to <code>.status.certificate</code>."],
+    ["📜", "jane.crt", "6 · Retrieve the certificate", "Decode <code>.status.certificate</code> to <code>jane.crt</code>. Valid until <code>expirationSeconds</code> runs out."],
+    ["🛡️", "RBAC", "7 · Grant permissions", "Authenticated is not authorised. Without a Role + RoleBinding, every request from jane is <b>Forbidden</b>. Bind <code>pod-reader</code> in namespace <code>dev</code>."],
+    ["🚀", "kubeconfig", "8 · Use it", "Put cluster CA, <code>jane.crt</code> and <code>jane.key</code> in a kubeconfig. kubectl presents the cert in the TLS handshake; the API server reads CN/O and RBAC decides."]
+  ];
+const CSTEPS = [
+    { title: "Key + CSR", where: "jane's machine", whereClass: "green", why: "The user generates the key pair. Only the public part goes to the cluster inside the CSR. O= sets group membership; add several /O= for several groups.", code:
+`openssl genrsa -out jane.key 2048
+openssl req -new -key jane.key -out jane.csr \\
+  -subj "/CN=jane/O=dev-team"
+
+openssl req -in jane.csr -noout -subject   # subject=CN = jane, O = dev-team` },
+    { title: "Submit CSR object", where: "Admin", whereClass: "violet", why: "signerName kubernetes.io/kube-apiserver-client is the built-in signer for client certs the API server trusts. expirationSeconds keeps the cert short-lived (minimum 600 s).", code:
+`cat <<EOF | kubectl apply -f -
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: jane
+spec:
+  request: $(base64 < jane.csr | tr -d '\\n')
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400    # 24h
+  usages:
+  - client auth
+EOF
+
+kubectl get csr jane     # CONDITION: Pending` },
+    { title: "Approve", where: "Admin", whereClass: "violet", why: "Approval is a separate RBAC permission (update on certificatesigningrequests/approval plus approve on the signer). Always inspect the subject before approving: approving O=system:masters would hand out cluster-admin.", code:
+`kubectl get csr jane -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -subject
+kubectl certificate approve jane
+kubectl get csr jane     # CONDITION: Approved,Issued` },
+    { title: "Extract certificate", where: "Admin", whereClass: "violet", why: "The signed cert lives in .status.certificate, base64 encoded. CSR objects are garbage-collected (approved ones after about 1 hour), so extract it promptly.", code:
+`kubectl get csr jane -o jsonpath='{.status.certificate}' | base64 -d > jane.crt
+openssl x509 -in jane.crt -noout -subject -issuer -dates
+# issuer=CN = kubernetes   notAfter=… (+24h)` },
+    { title: "RBAC Role + binding", where: "Admin", whereClass: "violet", why: "A Role is namespaced permissions; a RoleBinding attaches it to a subject. Use ClusterRole + ClusterRoleBinding for cluster-wide rights. Binding the group instead of the user scales better.", code:
+`kubectl create namespace dev
+
+kubectl create role pod-reader -n dev \\
+  --verb=get,list,watch,create --resource=pods
+
+kubectl create rolebinding jane-pod-reader -n dev \\
+  --role=pod-reader --user=jane
+# alternative: --group=dev-team
+
+kubectl auth can-i list pods -n dev --as=jane      # yes
+kubectl auth can-i delete pods -n dev --as=jane    # no` },
+    { title: "Build kubeconfig", where: "Admin → jane", whereClass: "violet", why: "A kubeconfig joins three things: cluster (server + CA), user (cert + key) and context (cluster + user + default namespace). --embed-certs makes it a single portable file.", code:
+`CLUSTER=$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')
+SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+kubectl config view --raw --minify \\
+  -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > ca.crt
+
+export KCFG=jane.kubeconfig
+kubectl config --kubeconfig=$KCFG set-cluster $CLUSTER \\
+  --server=$SERVER --certificate-authority=ca.crt --embed-certs=true
+kubectl config --kubeconfig=$KCFG set-credentials jane \\
+  --client-certificate=jane.crt --client-key=jane.key --embed-certs=true
+kubectl config --kubeconfig=$KCFG set-context jane@$CLUSTER \\
+  --cluster=$CLUSTER --user=jane --namespace=dev
+kubectl config --kubeconfig=$KCFG use-context jane@$CLUSTER` },
+    { title: "Test as jane", where: "jane's machine", whereClass: "green", why: "kubectl auth whoami shows exactly what the API server authenticated: username and groups (plus system:authenticated). Any Forbidden error means authentication worked and RBAC said no.", code:
+`export KUBECONFIG=$PWD/jane.kubeconfig
+
+kubectl auth whoami
+# Username  jane
+# Groups    [dev-team system:authenticated]
+
+kubectl get pods                      # allowed (namespace dev)
+kubectl run web --image=nginx         # allowed (create pods)
+kubectl get pods -n default           # Error: Forbidden
+kubectl delete pod web                # Error: Forbidden
+kubectl auth can-i --list             # everything jane may do` },
+    { title: "Clean up / revoke", where: "Admin", whereClass: "violet", why: "Deleting the binding removes authorisation immediately. The certificate itself stays valid until it expires; that is why short expiry matters.", code:
+`kubectl delete rolebinding jane-pod-reader -n dev
+kubectl delete role pod-reader -n dev
+kubectl delete csr jane
+rm jane.key jane.csr jane.crt jane.kubeconfig ca.crt` }
+  ];
+function initSim() {
+  /* Request pipeline simulator */
+  const STAGES = [["TLS + AuthN", "x509: CN / O"], ["AuthZ", "RBAC"], ["Mutating", "admission"], ["Schema", "validation"], ["Validating", "admission"], ["etcd", "persist / read"]];
+  $("#pipeRow").innerHTML = STAGES.map(s => `<div class="stage"><b>${s[0]}</b><small>${s[1]}</small></div>`).join("");
+  let pipeBusy = false;
+  $("#ciSend").onclick = () => {
+    if (pipeBusy) return; pipeBusy = true;
+    const verb = $("#ciVerb").value, res = $("#ciRes").value, ns = $("#ciNs").value;
+    const allowed = ns === "dev" && res === "pods" && ["get", "list", "watch", "create"].includes(verb);
+    const write = ["create", "update", "delete"].includes(verb);
+    const stages = [...$("#pipeRow").children];
+    stages.forEach(s => s.className = "stage");
+    const out = $("#pipeOut");
+    const group = res === "pods" || res === "services" || res === "secrets" ? "/api/v1" : "/apis/apps/v1";
+    out.innerHTML = `<span class="faint">→ ${verb.toUpperCase()} ${group}/namespaces/${ns}/${res}  (user=jane, groups=[dev-team, system:authenticated])</span>`;
+    const path = [0, 1].concat(allowed ? (write ? [2, 3, 4, 5] : [5]) : []);
+    let k = 0;
+    const tick = () => {
+      if (k > 0) stages[path[k - 1]].className = "stage pass";
+      if (k === path.length) {
+        out.innerHTML += allowed
+          ? `<br><span style="color:var(--green)">✓ ${write ? "201 Created / 200 OK" : "200 OK"}: RBAC rule matched Role dev/pod-reader${write ? "; admission chain passed" : ""}</span>`
+          : "";
+        pipeBusy = false; return;
+      }
+      const idx = path[k];
+      if (idx === 1 && !allowed) {
+        stages[1].className = "stage deny";
+        out.innerHTML += `<br><span style="color:var(--red)">✗ 403 Forbidden: User "jane" cannot ${verb} resource "${res}" in API group "${group === "/api/v1" ? "" : "apps"}" in the namespace "${ns}"</span>`;
+        pipeBusy = false; return;
+      }
+      stages[idx].className = "stage hit";
+      k++; setTimeout(tick, 550);
+    };
+    setTimeout(tick, 250);
+  };
+}
+K8S_RENDER({
+  id: "security-csr", group: "security", minutes: 25,
+  title: 'Users, certificates & <span class="grad-text">CSRs</span>',
+  lead: "Kubernetes has <b>no User object</b>. A 'user' is whatever an authenticator says. With X.509 client certificates, the certificate's <b>CN</b> becomes the username and each <b>O</b> becomes a group; any certificate signed by the cluster CA is trusted.",
+  parts: [["Flow", "Key → CSR → approve → kubeconfig"], ["Hands-on", "Create user jane"], ["Simulator", "AuthN → AuthZ → admission"], ["Caveats", "Revocation and groups"]],
+  sections: [
+    { id: "flow", title: "From private key to allowed request", toc: "Flow", blocks: [{ type: "flow", nodes: FLOW.map(f => [f[0], f[1], f[2].replace(/^\d+ · /, ""), f[3]]) }] },
+    { id: "handson", title: "Hands-on: create user jane", toc: "Hands-on", blocks: [{ type: "steps", steps: CSTEPS.map(s => Object.assign({}, s, { codeTitle: s.where.toLowerCase().replace(/[^a-z]+/g, "-") })) }] },
+    { id: "sim", title: "Request pipeline simulator", toc: "Simulator", blocks: [{ type: "custom", html: `<p class="muted reveal" style="margin-top:0;font-size:14px">jane has Role <code>pod-reader</code> in namespace <code>dev</code> (get, list, watch, create on pods). Pick a request and send it through the API server.</p>
+      <div class="pipe glass reveal">
+        <div class="canI">
+          <label>Verb<select class="input" id="ciVerb"><option>get</option><option>list</option><option>watch</option><option>create</option><option>delete</option><option>update</option></select></label>
+          <label>Resource<select class="input" id="ciRes"><option>pods</option><option>deployments</option><option>secrets</option><option>services</option></select></label>
+          <label>Namespace<select class="input" id="ciNs"><option>dev</option><option>default</option><option>kube-system</option></select></label>
+          <button class="btn primary" id="ciSend">Send request</button>
+        </div>
+        <div class="pipe-row" id="pipeRow"></div>
+        <div class="pipe-out" id="pipeOut"><span class="faint"># waiting for a request…</span></div>
+      </div>
+
+      `, init: initSim }] },
+    { id: "caveats", title: "Caveats", toc: "Caveats", blocks: [
+      { type: "callout", kind: "warn", html: "<b>You cannot revoke a client certificate.</b> Kubernetes does not check a CRL. If jane's key leaks, the cert works until it expires. Remove access by deleting the RoleBinding, and always set a short <code>expirationSeconds</code>. For real teams, prefer OIDC (see API access & hardening) for humans and ServiceAccount tokens for workloads." },
+      { type: "callout", kind: "tip", html: "<b>Bind groups, not people.</b> The cert's <code>O=dev-team</code> lets you write one RoleBinding with <code>--group=dev-team</code>. Never use <code>O=system:masters</code>: that group bypasses RBAC entirely." }
+    ] }
+  ],
+  summary: {
+    takeaways: [[
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][5], [
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][6], [
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][7], [
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][8],
+      ["🔍", "kubectl auth whoami", "Shows the username and groups the API server authenticated."],
+      ["🧾", "CSRs are garbage-collected", "Extract the issued certificate promptly."]],
+    cheat: `openssl genrsa -out jane.key 2048
+openssl req -new -key jane.key -subj "/CN=jane/O=dev-team" -out jane.csr
+kubectl apply -f csr.yaml   # signerName: kubernetes.io/kube-apiserver-client
+kubectl certificate approve jane
+kubectl get csr jane -o jsonpath='{.status.certificate}' | base64 -d > jane.crt
+kubectl create rolebinding jane-pods --role=pod-reader --user=jane -n dev
+kubectl auth can-i list pods -n dev --as=jane`,
+    quiz: [[
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][2], [
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][3], [
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][4], [
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][5]]
+  }
+});
+</script>
+</body>
+</html>

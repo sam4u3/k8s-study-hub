@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hooks & Tests</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+<style>
+  .hk { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+  .hk th, .hk td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .hk input[type=number] { width: 64px; }
+  .hlog { display: grid; gap: 6px; margin-top: 12px; }
+  .hlog div { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); font: 12px var(--mono); opacity: 0; transform: translateY(6px); transition: all .35s; overflow-wrap: anywhere; }
+  .hlog div.in { opacity: 1; transform: none; }
+  .hlog .ok { border-color: rgba(52,211,153,.5); } .hlog .bad { border-color: var(--red); color: var(--red); } .hlog .main { border-color: rgba(91,140,255,.6); }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Hook runner: sorts hooks by weight, then kind (Helm's install order), then name, and applies delete policies.
+const KIND_ORDER = ["Secret", "ConfigMap", "ServiceAccount", "Service", "Pod", "Job"];
+const HOOKS = [
+  { name: "db-migrate", kind: "Job", events: ["pre-install", "pre-upgrade"], weight: -5, policy: "before-hook-creation,hook-succeeded" },
+  { name: "seed-config", kind: "ConfigMap", events: ["pre-install"], weight: 0, policy: "before-hook-creation" },
+  { name: "create-schema", kind: "Job", events: ["pre-install"], weight: 0, policy: "hook-succeeded" },
+  { name: "notify-slack", kind: "Job", events: ["post-install", "post-upgrade"], weight: 0, policy: "hook-succeeded,hook-failed" }
+];
+const hHtml = `
+<div class="sim glass">
+  <div class="tbl-wrap"><table class="hk"><tr><th>hook resource</th><th>helm.sh/hook</th><th>weight</th><th>delete policy</th></tr>
+    ${HOOKS.map((h, i) => `<tr><td>${h.kind}/${h.name}</td><td>${h.events.join(",")}</td><td><input class="input" type="number" value="${h.weight}" data-w="${i}"></td><td>${h.policy}</td></tr>`).join("")}</table></div>
+  <div class="ctrl" style="margin:12px 0 0;flex-wrap:wrap">
+    <button class="btn primary" id="hInst">helm install shop</button>
+    <button class="btn" id="hUp">helm upgrade shop</button>
+    <label style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="hFail"> db-migrate Job fails</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="hNo"> --no-hooks</label>
+  </div>
+  <div class="hlog" id="hLog"></div>
+  <div class="pipe-out" id="hOut"></div>
+</div>`;
+function sortHooks(list) {
+  return list.slice().sort((a, b) => a.weight - b.weight || KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.name.localeCompare(b.name));
+}
+function initHooks(el) {
+  const $ = s => el.querySelector(s);
+  let timers = [];
+  const run = op => {
+    timers.forEach(clearTimeout); timers = [];
+    HOOKS.forEach((h, i) => h.weight = +el.querySelector(`[data-w="${i}"]`).value || 0);
+    const fail = $("#hFail").checked, noHooks = $("#hNo").checked;
+    const steps = [], left = [];
+    let failed = false;
+    if (op === "install") steps.push(["main", "crds/ installed (install only, before templates)"]);
+    steps.push(["main", "templates rendered"]);
+    const phase = when => {
+      if (noHooks) return;
+      sortHooks(HOOKS.filter(h => h.events.includes(`${when}-${op}`))).forEach(h => {
+        if (failed) return;
+        const bad = fail && h.name === "db-migrate";
+        steps.push([bad ? "bad" : "ok", `${when}-${op} · weight ${h.weight} · ${h.kind}/${h.name} ${h.kind === "Job" ? (bad ? "→ Job failed (BackoffLimitExceeded)" : "→ waited until Job complete") : "→ created"}`]);
+        const del = h.policy.split(",");
+        if (!(bad ? del.includes("hook-failed") : del.includes("hook-succeeded"))) left.push(`${h.kind}/${h.name}`);
+        if (bad) failed = true;
+      });
+    };
+    phase("pre");
+    if (!failed) {
+      steps.push(["main", `release resources ${op === "install" ? "created" : "updated"}: Deployment, Service, ConfigMap…`]);
+      phase("post");
+    }
+    const log = $("#hLog");
+    log.innerHTML = steps.map(s => `<div class="${s[0]}">${s[1]}</div>`).join("");
+    [...log.children].forEach((d, i) => timers.push(setTimeout(() => d.classList.add("in"), 120 + i * 260)));
+    timers.push(setTimeout(() => {
+      $("#hOut").innerHTML = (failed
+        ? `<span style="color:var(--red)">Error: ${op === "install" ? "INSTALLATION" : "UPGRADE"} FAILED: failed pre-${op}: job db-migrate failed: BackoffLimitExceeded</span><br><span class="muted">Release status: failed. The app's own resources were never applied.</span>`
+        : `<span style="color:var(--green)">✓ STATUS: deployed</span>`) +
+        `<br><span class="muted">Hook resources left in the cluster: ${left.length ? left.join(", ") : "none"}. Hooks aren't part of the release, so helm uninstall won't remove them.</span>`;
+    }, 200 + steps.length * 260));
+  };
+  $("#hInst").onclick = () => run("install");
+  $("#hUp").onclick = () => run("upgrade");
+  run("install");
+}
+
+K8S_RENDER({
+  id: "helm-hooks", group: "charts", minutes: 20,
+  title: 'Chart <span class="grad-text">hooks</span> & tests',
+  lead: "Hooks let a chart run work at fixed points in a release's life: migrate a database before an upgrade, back up before delete, notify after install. Tests are hooks you run on demand.",
+  parts: [["Hook events", "When hooks run"], ["Hook runner", "Weights and delete policies"], ["Writing a hook", "Annotations"], ["Chart tests", "helm test"]],
+  sections: [
+    { id: "events", title: "Hook events", toc: "Hook events",
+      blocks: [
+        { type: "table", head: ["Annotation value", "Runs"], rows: [
+          ["<code>pre-install</code>", "After templates render, before any resource is created"],
+          ["<code>post-install</code>", "After all resources are loaded into Kubernetes"],
+          ["<code>pre-upgrade</code> / <code>post-upgrade</code>", "Before / after resources are updated on upgrade"],
+          ["<code>pre-rollback</code> / <code>post-rollback</code>", "Before / after resources are rolled back"],
+          ["<code>pre-delete</code> / <code>post-delete</code>", "Before any resource is deleted / after all are deleted, on uninstall"],
+          ["<code>test</code>", "Only when you run <code>helm test</code>"]
+        ] },
+        { type: "flow", nodes: [
+          ["⌨️", "helm install", "You run helm install", "The library loads the chart and values."],
+          ["🧱", "CRDs", "crds/ installed", "On install only, before rendering."],
+          ["🧩", "Render", "Templates rendered", "Hooks and normal resources are separated by their annotations."],
+          ["🪝", "pre-install", "pre-install hooks", "Sorted by weight, kind, name. Job and Pod hooks block until they complete; failure fails the release."],
+          ["🚀", "Resources", "Release resources applied", "With --wait, Helm waits for them to be ready before post hooks."],
+          ["🔔", "post-install", "post-install hooks", "Same rules; then the release is marked deployed."]
+        ] }
+      ] },
+    { id: "runner", title: "Ordering and cleanup", toc: "Hook runner",
+      lead: "Change weights (lower runs first), make the migration fail, or skip hooks. Watch what runs and what is left behind.",
+      blocks: [{ type: "custom", html: hHtml, init: initHooks },
+        { type: "table", head: ["helm.sh/hook-delete-policy", "Deletes the hook resource"], rows: [
+          ["<code>before-hook-creation</code> (default)", "Just before a new run of the same hook creates it again"],
+          ["<code>hook-succeeded</code>", "Right after the hook succeeds"],
+          ["<code>hook-failed</code>", "Right after the hook fails"]
+        ] },
+        { type: "callout", kind: "warn", html: "Hook resources aren't tracked as part of the release. <code>helm uninstall</code> leaves them, and a failed Job with no <code>hook-failed</code> policy stays for you to debug. Add <code>helm.sh/resource-policy: keep</code> to anything that must never be deleted." }] },
+    { id: "write", title: "Writing a hook", toc: "Writing a hook",
+      blocks: [
+        { type: "yaml", title: "templates/db-migrate-job.yaml", lines: [
+          ["apiVersion: batch/v1"],
+          ["kind: Job"],
+          ["metadata:"],
+          ['  name: "{{ .Release.Name }}-db-migrate"'],
+          ["  annotations:"],
+          ['    "helm.sh/hook": pre-install,pre-upgrade', "Comma-separated events. This resource is a hook, not a normal release resource."],
+          ['    "helm.sh/hook-weight": "-5"', "A string. Lower runs first; default 0. Use weights whenever order matters."],
+          ['    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded', "Delete the old Job before re-running, and delete it once it succeeds."],
+          ["spec:"],
+          ["  backoffLimit: 1", "Helm waits for a Job hook to complete. Keep retries low so a bad migration fails fast."],
+          ["  template:"],
+          ["    spec:"],
+          ["      restartPolicy: Never"],
+          ["      containers:"],
+          ["      - name: migrate"],
+          ['        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"'],
+          ['        command: ["./migrate", "up"]']
+        ] },
+        { type: "callout", kind: "tip", html: "Since Helm 4, post-renderer plugins process hooks too. If a hook needs a ServiceAccount or Secret, create that as a hook with a lower weight; normal release resources don't exist yet during pre-install." }
+      ] },
+    { id: "tests", title: "Chart tests", toc: "Chart tests",
+      lead: "A test is a Pod (usually) with <code>helm.sh/hook: test</code>. It passes if its container exits 0. Put tests in <code>templates/tests/</code>.",
+      blocks: [
+        { type: "code", title: "templates/tests/test-connection.yaml", code: `apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "web.fullname" . }}-test-connection"
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+  - name: wget
+    image: busybox
+    command: ['wget']
+    args: ['{{ include "web.fullname" . }}:{{ .Values.service.port }}']` },
+        { type: "term", title: "run tests", lines: [
+          "$ helm install web ./web --wait",
+          "$ helm test web --logs",
+          "NAME: web",
+          "LAST DEPLOYED: …",
+          "STATUS: deployed",
+          "TEST SUITE:     web-test-connection",
+          "Last Started:   …",
+          "Phase:          Succeeded",
+          "✓ --logs prints the test Pod's output"
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🪝", "Hooks = annotated resources", "helm.sh/hook decides when they run."],
+      ["⚖️", "Weights", "Ascending; then kind, then name. Set them explicitly."],
+      ["⏸️", "Jobs block", "Helm waits for Job/Pod hooks; failure fails the release."],
+      ["🧹", "Delete policies", "before-hook-creation is the default."],
+      ["👻", "Not release-managed", "Uninstall leaves hook resources."],
+      ["🧪", "helm test", "Test hooks run on demand; exit 0 passes."]
+    ],
+    cheat: `helm get hooks web                 # rendered hook manifests
+helm install web ./web --no-hooks  # skip hooks
+helm test web --logs
+helm test web --filter name=web-test-connection
+kubectl get jobs,pods -l app.kubernetes.io/instance=web`,
+    quiz: [
+      ["Two pre-install hooks have weights 5 and -1. Which runs first?", ["Weight 5", "Weight -1", "Alphabetical", "Both in parallel"], 1, "Lower weights run first."],
+      ["A pre-upgrade Job fails. What happens to the app's Deployment?", ["Updated anyway", "Not updated; upgrade fails", "Deleted", "Rolled back"], 1, "Failed blocking hooks stop the operation."],
+      ["What is the default hook delete policy?", ["hook-succeeded", "hook-failed", "before-hook-creation", "never"], 2, "The old hook object is removed just before the next run."],
+      ["Does helm uninstall delete a hook Job left over from install?", ["Yes", "No", "Only with --cascade", "Only in Helm 4"], 1, "Hook resources aren't tracked with the release."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

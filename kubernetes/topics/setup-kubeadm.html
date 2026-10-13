@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install with kubeadm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const codeBox = (t, c) => K8S_CODE(t, c);
+
+const KSTEPS = [
+    { title: "Prepare hosts", where: "All nodes", why: "Each node needs a unique name, name resolution for the others, and swap disabled. By default kubelet fails to start while swap is on.", code:
+`# Unique hostname per node (wk1, wk2 on the workers)
+sudo hostnamectl set-hostname cp1
+
+cat <<EOF | sudo tee -a /etc/hosts
+10.0.0.10 cp1
+10.0.0.11 wk1
+10.0.0.12 wk2
+EOF
+
+# Disable swap now and on reboot
+sudo swapoff -a
+sudo sed -i '/ swap / s/^/#/' /etc/fstab` },
+    { title: "Kernel modules & sysctl", where: "All nodes", why: "overlay is used by the container runtime's snapshotter. br_netfilter plus the bridge sysctls let iptables see bridged Pod traffic, which kube-proxy and most CNIs need. ip_forward lets the node route Pod packets.", code:
+`cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+sudo sysctl --system` },
+    { title: "Install containerd", where: "All nodes", why: "kubelet talks to the runtime through CRI. kubeadm configures kubelet with the systemd cgroup driver, so containerd must use systemd too. A mismatch causes Pods to restart randomly.", code:
+`sudo apt-get update
+sudo apt-get install -y containerd
+sudo mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml > /dev/null
+
+# Match kubelet's cgroup driver
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+grep SystemdCgroup /etc/containerd/config.toml   # expect: true
+
+sudo systemctl restart containerd
+sudo systemctl enable containerd` },
+    { title: "Install kubeadm, kubelet, kubectl", where: "All nodes", why: "Packages come from the community repo pkgs.k8s.io, one repo per minor version. apt-mark hold stops unattended upgrades from changing versions under a running cluster.", code:
+`K8S_VERSION={{VER}}
+sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+sudo mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/\${K8S_VERSION}/deb/Release.key \\
+  | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/\${K8S_VERSION}/deb/ /" \\
+  | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+sudo systemctl enable --now kubelet   # crash-loops until kubeadm init/join: normal` },
+    { title: "kubeadm init", where: "Control plane", whereClass: "violet", why: "Creates the CA and certificates, kubeconfigs, static Pod manifests and bootstrap token. --pod-network-cidr must match your CNI (Flannel default is 10.244.0.0/16). --control-plane-endpoint keeps the door open for HA later.", code:
+`sudo kubeadm config images pull
+
+sudo kubeadm init \\
+  --apiserver-advertise-address=10.0.0.10 \\
+  --control-plane-endpoint=cp1:6443 \\
+  --pod-network-cidr=10.244.0.0/16
+
+# Save the "kubeadm join ..." line printed at the end` },
+    { title: "Configure kubectl", where: "Control plane", whereClass: "violet", why: "admin.conf is bound to the kubeadm:cluster-admins group through RBAC. super-admin.conf (system:masters, bypasses RBAC) also exists since 1.29: keep it for emergencies only.", code:
+`mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+kubectl get nodes          # cp1  NotReady  control-plane
+kubectl get pods -n kube-system` },
+    { title: "Install a CNI plugin", where: "Control plane", whereClass: "violet", why: "Kubernetes defines the network model but ships no implementation. The CNI gives every Pod an IP and routes between nodes. Flannel is simplest; Calico or Cilium add NetworkPolicy support.", code:
+`# Flannel (uses 10.244.0.0/16 by default)
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+kubectl -n kube-flannel get pods -w
+
+kubectl get nodes          # cp1  Ready` },
+    { title: "Join the workers", where: "Workers", whereClass: "green", why: "The worker uses the bootstrap token to authenticate and the CA hash to verify it is talking to the right API server (no blind trust). kubelet then gets its own client cert through a CSR that is auto-approved.", code:
+`# On cp1: print a fresh join command (tokens last 24h)
+kubeadm token create --print-join-command
+
+# On wk1 and wk2:
+sudo kubeadm join cp1:6443 \\
+  --token abcdef.0123456789abcdef \\
+  --discovery-token-ca-cert-hash sha256:<hash>` },
+    { title: "Verify the cluster", where: "Control plane", whereClass: "violet", why: "All nodes Ready, system Pods Running, and a test Deployment scheduled across workers means networking, DNS and scheduling all work.", code:
+`kubectl get nodes -o wide
+kubectl get pods -A
+kubectl create deployment hello --image=nginx --replicas=3
+kubectl expose deployment hello --port=80
+kubectl get pods -o wide          # spread over wk1 / wk2
+kubectl run tmp --rm -it --image=busybox -- wget -qO- hello` }
+  ];
+function initSteps(el) {
+  const host = el.querySelector("#kubeadmStepper");
+  const getVer = () => (el.querySelector("#verInput").value.trim() || "v1.37").replace(/^(\d)/, "v$1");
+  const draw = () => K8S_STEPPER(host, KSTEPS.map(s => Object.assign({}, s, { codeTitle: s.where.toLowerCase().replace(/ /g, "-"), code: s.code.replace(/{{VER}}/g, getVer()) })));
+  el.querySelector("#verInput").addEventListener("input", draw);
+  draw();
+}
+function initPhases() {
+  const PHASES = [
+    ["preflight", "Checks root, swap, ports, CRI socket, kernel modules; pulls images", "[preflight] Running pre-flight checks\n[preflight] Pulling images required for setting up a Kubernetes cluster"],
+    ["certs", "Creates CA, apiserver, etcd, front-proxy and SA keys in /etc/kubernetes/pki", "[certs] Generating \"ca\" certificate and key\n[certs] apiserver serving cert is signed for DNS names [cp1 kubernetes kubernetes.default ...]\n[certs] Generating \"etcd/ca\" certificate and key\n[certs] Generating \"sa\" key and public key"],
+    ["kubeconfig", "admin.conf, super-admin.conf, kubelet.conf, controller-manager.conf, scheduler.conf", "[kubeconfig] Writing \"admin.conf\" kubeconfig file\n[kubeconfig] Writing \"super-admin.conf\" kubeconfig file\n[kubeconfig] Writing \"kubelet.conf\" kubeconfig file"],
+    ["etcd", "Static Pod manifest for a local etcd member", "[etcd] Creating static Pod manifest for local etcd in \"/etc/kubernetes/manifests\""],
+    ["control-plane", "Static Pod manifests for apiserver, controller-manager, scheduler", "[control-plane] Creating static Pod manifest for \"kube-apiserver\"\n[control-plane] Creating static Pod manifest for \"kube-controller-manager\"\n[control-plane] Creating static Pod manifest for \"kube-scheduler\""],
+    ["kubelet-start", "Writes /var/lib/kubelet/config.yaml and (re)starts kubelet", "[kubelet-start] Writing kubelet configuration to file \"/var/lib/kubelet/config.yaml\"\n[kubelet-start] Starting the kubelet"],
+    ["wait-control-plane", "kubelet launches the static Pods; kubeadm polls /healthz", "[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods\n[api-check] The API server is healthy after 9.5s"],
+    ["upload-config", "Stores kubeadm and kubelet config as ConfigMaps in kube-system", "[upload-config] Storing the configuration used in ConfigMap \"kubeadm-config\" in the \"kube-system\" Namespace"],
+    ["mark-control-plane", "Labels node and adds NoSchedule taint", "[mark-control-plane] Marking the node cp1 as control-plane by adding the taints [node-role.kubernetes.io/control-plane:NoSchedule]"],
+    ["bootstrap-token", "Creates join token and RBAC for node bootstrap + CSR auto-approval", "[bootstrap-token] Using token: abcdef.0123456789abcdef\n[bootstrap-token] Configured RBAC rules to allow certificate rotation for all node client certificates"],
+    ["kubelet-finalize", "Points kubelet at its rotated client certificate", "[kubelet-finalize] Updating \"/etc/kubernetes/kubelet.conf\" to point to a rotatable kubelet client certificate and key"],
+    ["addon", "Installs CoreDNS and kube-proxy", "[addons] Applied essential addon: CoreDNS\n[addons] Applied essential addon: kube-proxy"],
+    ["show-join-command", "Prints kubeadm join for workers", "\nYour Kubernetes control-plane has initialized successfully!\n\nkubeadm join cp1:6443 --token abcdef.0123456789abcdef \\\n    --discovery-token-ca-cert-hash sha256:4f1c…"]
+  ];
+  const pl = $("#phaseList"), log = $("#phaseLog");
+  const logStart = log.innerHTML;
+  pl.innerHTML = PHASES.map(p => `<div class="phase"><span class="st"></span><div><b>${p[0]}</b><small>${p[1]}</small></div></div>`).join("");
+  let phaseTimer = null;
+  function resetPhases() {
+    clearTimeout(phaseTimer);
+    pl.querySelectorAll(".phase").forEach(p => p.className = "phase");
+    log.innerHTML = logStart; $("#phasePlay").disabled = false;
+  }
+  function runPhases() {
+    resetPhases(); $("#phasePlay").disabled = true;
+    const items = pl.querySelectorAll(".phase");
+    log.innerHTML = log.innerHTML.replace('<span class="caret"></span>', "");
+    let i = 0;
+    const next = () => {
+      if (i > 0) items[i - 1].className = "phase ok";
+      if (i >= items.length) {
+        log.innerHTML += `<span class="caret"></span>`; $("#phasePlay").disabled = false; return;
+      }
+      items[i].className = "phase run";
+      const cls = PHASES[i][0] === "show-join-command" ? "tok-s" : "";
+      log.innerHTML += `<span class="${cls}">${esc(PHASES[i][2])}</span>\n`;
+      log.scrollTop = log.scrollHeight;
+      i++; phaseTimer = setTimeout(next, 750);
+    };
+    next();
+  }
+  $("#phasePlay").onclick = runPhases;
+  $("#phaseReset").onclick = resetPhases;
+}
+K8S_RENDER({
+  id: "setup-kubeadm", group: "setup", minutes: 30,
+  title: 'Install a cluster with <span class="grad-text">kubeadm</span>',
+  lead: "<code>kubeadm</code> bootstraps a conformant cluster. It does not provision machines and it does not install a network plugin. You bring the nodes, a container runtime and a CNI; kubeadm creates certificates, kubeconfigs and the control plane as static Pods.",
+  parts: [["Topology", "1 control plane + 2 workers"], ["Requirements", "Hardware, ports"], ["Install", "9 steps, version-aware"], ["kubeadm init", "Every phase, animated"]],
+  sections: [
+    { id: "topology", title: "Target topology", toc: "Topology", blocks: [{ type: "custom", html: `
+      <div class="topo glass reveal">
+        <div class="node">
+          <h5><span>🧠 cp1 · control plane</span><span class="faint">10.0.0.10</span></h5>
+          <div class="pods">
+            <span class="pod cp">kube-apiserver</span><span class="pod cp">etcd</span><span class="pod cp">kube-scheduler</span><span class="pod cp">kube-controller-manager</span><span class="pod sys">kubelet</span>
+          </div>
+          <p class="faint" style="font-size:12.5px;margin:10px 0 0">Control plane components run as <b>static Pods</b> from <code>/etc/kubernetes/manifests</code>. kubelet runs as a systemd service.</p>
+        </div>
+        <div class="workers">
+          <div class="link-line"></div>
+          <div class="node"><h5><span>⚙️ wk1 · worker</span><span class="faint">10.0.0.11</span></h5><div class="pods"><span class="pod sys">kubelet</span><span class="pod wk">kube-proxy</span><span class="pod wk">containerd</span><span class="pod wk">CNI</span></div></div>
+          <div class="node"><h5><span>⚙️ wk2 · worker</span><span class="faint">10.0.0.12</span></h5><div class="pods"><span class="pod sys">kubelet</span><span class="pod wk">kube-proxy</span><span class="pod wk">containerd</span><span class="pod wk">CNI</span></div></div>
+        </div>
+      </div>
+
+      ` }] },
+    { id: "requirements", title: "Requirements & ports", toc: "Requirements", blocks: [{ type: "custom", html: `
+      <div class="cols">
+        <div class="panel glass reveal">
+          <ul style="margin:0;padding-left:18px;color:var(--muted);font-size:14px;line-height:1.9">
+            <li>Linux (Debian/Ubuntu shown here), <b>2 CPU</b> and <b>2 GB RAM</b> minimum per control-plane node</li>
+            <li>Unique hostname, MAC address and <code>product_uuid</code> per node</li>
+            <li>Full network connectivity between all nodes</li>
+            <li>Swap off (or kubelet explicitly configured for swap)</li>
+            <li>A CRI runtime: containerd or CRI-O</li>
+          </ul>
+        </div>
+        <div class="panel glass reveal tbl-wrap">
+          <table class="tbl">
+            <tr><th>Port</th><th>Component</th><th>Node</th></tr>
+            <tr><td><code>6443</code></td><td>kube-apiserver</td><td>control plane</td></tr>
+            <tr><td><code>2379-2380</code></td><td>etcd client / peer</td><td>control plane</td></tr>
+            <tr><td><code>10250</code></td><td>kubelet API</td><td>all</td></tr>
+            <tr><td><code>10257</code></td><td>controller-manager</td><td>control plane</td></tr>
+            <tr><td><code>10259</code></td><td>scheduler</td><td>control plane</td></tr>
+            <tr><td><code>30000-32767</code></td><td>NodePort Services</td><td>workers</td></tr>
+          </table>
+        </div>
+      </div>
+
+      ` }] },
+    { id: "install", title: "Step-by-step install", toc: "Install", blocks: [{ type: "custom", html: `<div class="ver-row">
+        Kubernetes minor version for the package repo:
+        <input class="input" id="verInput" value="v1.37" spellcheck="false" aria-label="Kubernetes version">
+        <span class="faint">Check the current stable minor at kubernetes.io/releases. Commands below update live.</span>
+      </div>
+      <div class="glass stepper" id="kubeadmStepper"></div>`, init: initSteps }] },
+    { id: "init", title: "What kubeadm init actually does", toc: "kubeadm init", blocks: [{ type: "custom", html: `<p class="muted reveal" style="margin-top:0">Press play. Each phase can also be run alone with <code>kubeadm init phase &lt;name&gt;</code>.</p>
+      <div class="phases reveal">
+        <div class="panel glass">
+          <div class="phase-list" id="phaseList"></div>
+          <div style="margin-top:14px;display:flex;gap:8px"><button class="btn primary small" id="phasePlay">▶ Run kubeadm init</button><button class="btn small" id="phaseReset">Reset</button></div>
+        </div>
+        <div class="code" style="margin:0"><div class="code-head"><span><span class="dots"><i></i><i></i><i></i></span>root@cp1</span></div><pre id="phaseLog"><span class="faint">$ sudo kubeadm init --pod-network-cidr=10.244.0.0/16</span>
+<span class="caret"></span></pre></div>
+      </div>
+
+      <div class="callout warn reveal"><span class="ic">⚠️</span><div><b>Node stays <code>NotReady</code> after init?</b> Expected. kubelet reports NotReady until a CNI plugin is installed. CoreDNS Pods also stay <code>Pending</code> until then.</div></div>
+      <div class="callout tip reveal"><span class="ic">💡</span><div><b>Lost the join command?</b> Bootstrap tokens expire after 24 h. Run <code>kubeadm token create --print-join-command</code> on the control plane for a fresh one.</div></div>
+    `, init: initPhases }] }
+  ],
+  summary: {
+    takeaways: [[
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][1], [
+    ["🧬", "Born from Borg", "Kubernetes packages 10+ years of Google cluster experience: declarative state, controllers reconciling it, labels, one IP per Pod."],
+    ["🏗️", "kubeadm = bootstrap only", "You provide machines, runtime (containerd, systemd cgroups) and CNI. kubeadm builds PKI, kubeconfigs and static-Pod control plane."],
+    ["🌐", "NotReady until CNI", "Nodes stay NotReady and CoreDNS Pending until a network plugin runs. --pod-network-cidr must match the CNI."],
+    ["🗺️", "apiVersion = group/version", "Core group lives at /api/v1 (apiVersion: v1). Every other group lives at /apis/&lt;group&gt;/&lt;version&gt;."],
+    ["📈", "alpha → beta → GA", "Use GA versions. Removed beta APIs break old manifests on upgrade, not running objects."],
+    ["👤", "No User object", "Identity comes from the authenticator. For X.509: CN = username, O = groups. The cluster CA is the root of trust."],
+    ["✍️", "CSR workflow", "Key stays with the user → CSR object (kube-apiserver-client signer) → approve → controller-manager signs → kubeconfig."],
+    ["🛡️", "AuthN ≠ AuthZ", "A valid cert only proves who you are. RBAC Roles + Bindings decide what you can do; default is deny."],
+    ["⏳", "Certs can't be revoked", "Use short expirationSeconds, bind groups, remove bindings to cut access. Prefer OIDC for humans at scale."]
+  ][2],
+      ["🧩", "Static Pods", "Control plane runs from /etc/kubernetes/manifests, started by the kubelet."],
+      ["🔐", "PKI in /etc/kubernetes/pki", "kubeadm creates the CAs and every component certificate."],
+      ["🎫", "Join with tokens", "Bootstrap tokens expire after 24 h; print a new join command anytime."],
+      ["🧮", "Version per repo", "pkgs.k8s.io has one apt/yum repo per minor version."]],
+    cheat: `# all nodes
+swapoff -a; modprobe overlay br_netfilter; sysctl --system
+apt-get install -y containerd kubelet kubeadm kubectl
+# control plane
+kubeadm init --pod-network-cidr=10.244.0.0/16
+cp /etc/kubernetes/admin.conf ~/.kube/config
+kubectl apply -f <cni.yaml>
+kubeadm token create --print-join-command
+# workers
+kubeadm join cp1:6443 --token … --discovery-token-ca-cert-hash sha256:…`,
+    quiz: [[
+    ["Which apiVersion and URL prefix does a Pod use?", ["apps/v1 at /apis/apps/v1", "v1 at /api/v1", "core/v1 at /apis/core/v1", "pods/v1 at /api/pods/v1"], 1, "Pods are in the core (unnamed) group, served under the legacy /api prefix. In YAML: apiVersion: v1."],
+    ["After kubeadm init the node shows NotReady. Most likely cause?", ["etcd failed", "The worker has not joined", "No CNI plugin installed yet", "kubectl is the wrong version"], 2, "kubelet reports the node NotReady until a CNI plugin configures Pod networking."],
+    ["Where does Kubernetes store user accounts for X.509 users?", ["In etcd as User objects", "In /etc/kubernetes/users", "Nowhere: identity comes from cert CN and O", "In the kube-system ServiceAccount list"], 2, "There is no User resource. The API server trusts any cert signed by the cluster CA and reads CN as username, O as groups."],
+    ["Which signerName issues client certs that kube-apiserver accepts for users?", ["kubernetes.io/kubelet-serving", "kubernetes.io/kube-apiserver-client", "kubernetes.io/legacy-unknown", "certificates.k8s.io/user"], 1, "kubernetes.io/kube-apiserver-client with usages [client auth]."],
+    ["Which component actually signs an approved CSR?", ["kube-apiserver", "kubelet", "kube-controller-manager", "etcd"], 2, "The csrsigning controller in kube-controller-manager signs with the cluster CA key."],
+    ["jane's key leaked. Fastest way to stop her access?", ["Revoke the certificate with kubectl", "Delete her RoleBinding(s)", "Delete the CSR object", "Restart kube-apiserver"], 1, "Kubernetes has no cert revocation. Removing RBAC bindings cuts authorisation at once; the cert stays valid until expiry."]
+  ][1],
+      ["Which kubelet cgroup driver does kubeadm configure, so containerd must match?", ["cgroupfs", "systemd", "none", "docker"], 1, "Set SystemdCgroup = true in containerd's config."],
+      ["Where do control-plane component manifests live on a kubeadm node?", ["/etc/kubernetes/manifests", "/var/lib/etcd", "/opt/cni/bin", "~/.kube"], 0, "The kubelet runs them as static Pods."],
+      ["Your join command's token expired. What do you run?", ["kubeadm reset", "kubeadm token create --print-join-command", "kubeadm init again", "kubectl join"], 1, "Tokens last 24 h by default."]]
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logging and Troubleshooting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Troubleshooting decision tree.
+const TREE = {
+  start: ["What's wrong?", [["Pod not Running", "pod"], ["Pod Running but app unreachable", "svc"], ["Node problem", "node"], ["kubectl itself fails", "cp"]]],
+  pod: ["Pod STATUS?", [["Pending", "pending"], ["ImagePullBackOff / ErrImagePull", "image"], ["CrashLoopBackOff", "crash"], ["CreateContainerConfigError", "cfg"], ["ContainerCreating for minutes", "creating"]]],
+  pending: ["Run <code>kubectl describe pod</code> → Events", [["0/N nodes: Insufficient cpu/memory", "=Requests too big or cluster full. Lower requests, add nodes, or let the Cluster Autoscaler act. Check <code>kubectl describe node | grep -A5 Allocated</code>."], ["untolerated taint / didn't match node affinity", "=Fix tolerations, nodeSelector or affinity, or label the node (Scheduler topic)."], ["pod has unbound immediate PersistentVolumeClaims", "=PVC Pending: check StorageClass name, provisioner Pods, <code>kubectl describe pvc</code>."], ["SchedulingGated / exceeded quota", "=Remove scheduling gates; check <code>kubectl describe quota</code> (quota errors appear on the ReplicaSet as FailedCreate)."]]],
+  image: ["Events say…", [["not found / manifest unknown", "=Typo in image or tag, or wrong architecture. Verify with <code>docker manifest inspect</code>."], ["unauthorized / pull access denied", "=Missing or wrong imagePullSecrets; secret must be in the Pod's namespace."], ["i/o timeout / TLS errors", "=Node can't reach the registry: proxy, DNS or firewall on the node."]]],
+  crash: ["Check <code>kubectl logs &lt;pod&gt; --previous</code> and Last State", [["Exit code 1 / app error in logs", "=App bug or bad config. Compare env/ConfigMap/Secret values; run the image locally."], ["OOMKilled (exit 137)", "=Container exceeded its memory limit. Raise the limit or fix the leak; check VPA recommendations."], ["Exit 0 and restarts", "=Process finished but restartPolicy is Always: it's a Job, or the entrypoint isn't a long-running process."], ["Killed by liveness probe", "=Probe too strict or app slow to start: add a startupProbe, increase thresholds."]]],
+  cfg: ["Events say…", [["secret \"x\" not found / configmap not found", "=Create it in the same namespace or mark the ref optional."], ["couldn't find key", "=Key name mismatch in secretKeyRef/configMapKeyRef."]]],
+  creating: ["Events say…", [["FailedMount / MountVolume.SetUp failed", "=Volume can't attach/mount: CSI driver Pods, RWO volume still attached to another node, NFS reachability."], ["failed to set up sandbox / CNI", "=CNI Pods not running on that node; check <code>kubectl -n kube-system get pods -o wide</code>."]]],
+  svc: ["Work from the inside out", [["Pod works via kubectl port-forward pod?", "svc2"], ["Not even port-forward to the Pod works", "=App not listening on that port or only on 127.0.0.1. Check containerPort and app bind address (0.0.0.0)."]]],
+  svc2: ["Service level", [["kubectl get endpointslices shows no endpoints", "=Selector doesn't match Pod labels, or Pods not Ready (readiness probe)."], ["Endpoints OK but name doesn't resolve", "=DNS: test <code>nslookup svc.ns</code> from a busybox Pod; check CoreDNS (CoreDNS topic)."], ["Resolves but connection times out", "=targetPort mismatch, NetworkPolicy blocking, or kube-proxy/CNI issue on the node."], ["Works in-cluster, not from outside", "=Gateway/Ingress route, LoadBalancer status, DNS record, TLS cert (Gateway API topic)."]]],
+  node: ["<code>kubectl describe node</code> → Conditions", [["NotReady", "=kubelet down or can't reach API: <code>systemctl status kubelet</code>, <code>journalctl -u kubelet</code>, container runtime status, CNI not ready."], ["MemoryPressure / DiskPressure", "=Node-pressure eviction in progress; free disk (images, logs), add ephemeral-storage limits (Disruptions topic)."], ["SchedulingDisabled", "=Node cordoned: <code>kubectl uncordon</code> after maintenance."]]],
+  cp: ["Error message", [["connection refused / timeout to :6443", "=API server down or unreachable: on the node check <code>crictl ps | grep apiserver</code>, its logs, etcd health."], ["x509: certificate has expired", "=Renew certificates (Cluster lifecycle topic)."], ["Forbidden", "=Authenticated but RBAC denies: <code>kubectl auth can-i</code>."], ["the server doesn't have a resource type", "=CRD not installed or wrong API version: <code>kubectl api-resources</code>."]]]
+};
+const treeHtml = `<div class="sim glass"><div id="tPath" class="faint" style="font-size:12.5px;margin-bottom:10px"></div><h4 id="tQ" style="margin:0 0 12px"></h4><div id="tA" style="display:grid;gap:8px"></div><div class="ctrl"><button class="btn small" id="tBack">◀ Back</button><button class="btn small" id="tRestart">Restart</button></div></div>`;
+function initTree(el) {
+  const $ = s => el.querySelector(s); let hist = ["start"];
+  const show = () => {
+    const key = hist[hist.length - 1];
+    $("#tPath").textContent = hist.map(h => TREE[h] ? TREE[h][0].replace(/<[^>]+>/g, "") : "").join(" → ");
+    if (key.startsWith("=")) { $("#tQ").innerHTML = "💡 Likely cause and fix"; $("#tA").innerHTML = `<div class="flow-caption fadein"><p style="color:var(--text)">${key.slice(1)}</p></div>`; return; }
+    const [q, opts] = TREE[key];
+    $("#tQ").innerHTML = q;
+    $("#tA").innerHTML = opts.map((o, i) => `<button class="opt fadein" data-i="${i}">${o[0]}</button>`).join("");
+    $("#tA").querySelectorAll("[data-i]").forEach(b => b.onclick = () => { hist.push(opts[+b.dataset.i][1]); show(); });
+  };
+  $("#tBack").onclick = () => { if (hist.length > 1) hist.pop(); show(); };
+  $("#tRestart").onclick = () => { hist = ["start"]; show(); };
+  show();
+}
+
+K8S_RENDER({
+  id: "admin-debugging", group: "admin", minutes: 30,
+  title: 'Logging, events & <span class="grad-text">troubleshooting</span>',
+  lead: "Most Kubernetes problems are solved by reading the right thing in the right order: status, events, logs, then the layer below. This topic covers where each of those lives and a decision tree for the usual failures.",
+  parts: [["Logging architecture", "Where logs go"], ["Events", "The cluster's diary"], ["Debug tools", "describe, logs, debug, port-forward"], ["Decision tree", "Find the cause"], ["Control plane & traces", "System logs and tracing"]],
+  sections: [
+    { id: "logging", title: "Logging architecture", toc: "Logging architecture",
+      blocks: [
+        { type: "flow", nodes: [
+          ["📤", "stdout", "App writes to stdout/stderr", "The one rule: log to stdout/stderr, not files inside the container."],
+          ["🧾", "Runtime", "Runtime writes log files", "containerd writes <code>/var/log/pods/&lt;ns&gt;_&lt;pod&gt;_&lt;uid&gt;/&lt;container&gt;/0.log</code> on the node."],
+          ["🔄", "Rotation", "kubelet rotates", "<code>containerLogMaxSize</code> (10Mi) × <code>containerLogMaxFiles</code> (5). Old lines disappear."],
+          ["👀", "kubectl logs", "kubectl logs reads them", "Through the API server → kubelet. Only the current and previous container instance; deleted Pods = deleted logs."],
+          ["🚚", "Ship", "Node agent ships them", "A DaemonSet (Fluent Bit, Vector, OpenTelemetry Collector) tails /var/log/pods and sends to Loki, Elasticsearch, cloud logging."]
+        ] },
+        { type: "callout", kind: "warn", html: "Kubernetes has no built-in log storage. Without a log shipper, logs of crashed and deleted Pods are gone. Set one up before you need it." }
+      ] },
+    { id: "events", title: "Events", toc: "Events",
+      blocks: [
+        { type: "p", html: "Components record Events for things that happen to objects: Scheduled, Pulling, BackOff, FailedMount, Killing, ScalingReplicaSet… They're objects too (<code>events.k8s.io/v1</code>) and expire after <b>1 hour</b> by default, so look quickly or ship them (kube-state-metrics, event exporters)." },
+        { type: "term", title: "events", lines: [
+          "$ kubectl get events -n gamehub --sort-by=.lastTimestamp",
+          "$ kubectl get events -A --field-selector type=Warning",
+          "$ kubectl events --for pod/game-service-7c9f -n gamehub --watch",
+          "$ kubectl describe pod game-service-7c9f -n gamehub | sed -n '/Events:/,$p'"
+        ] }
+      ] },
+    { id: "tools", title: "The debugging toolkit", toc: "Debug tools",
+      blocks: [
+        { type: "table", head: ["Question", "Command"], rows: [
+          ["What state is it in and why?", "<code>kubectl get pod -o wide</code>, <code>kubectl describe pod</code>"],
+          ["What did the app say?", "<code>kubectl logs deploy/game-service -c game-service --since=10m -f</code>"],
+          ["What did it say before crashing?", "<code>kubectl logs &lt;pod&gt; --previous</code>"],
+          ["All Pods of an app at once", "<code>kubectl logs -l app=game-service --prefix --max-log-requests=10</code>"],
+          ["Look inside", "<code>kubectl exec -it &lt;pod&gt; -- sh</code> or <code>kubectl debug -it &lt;pod&gt; --image=busybox:1.36 --target=&lt;c&gt;</code>"],
+          ["Test bypassing Service/Ingress", "<code>kubectl port-forward pod/&lt;pod&gt; 8081</code>"],
+          ["Network from inside the cluster", "<code>kubectl run t --rm -it --image=nicolaka/netshoot -- bash</code>"],
+          ["Node-level", "<code>kubectl debug node/wk1 -it --image=ubuntu</code> (host at /host), <code>crictl</code>, <code>journalctl -u kubelet</code>"],
+          ["Exact API calls kubectl makes", "<code>kubectl get pods -v=8</code>"],
+          ["Resource usage", "<code>kubectl top pods --containers</code>"]
+        ] }
+      ] },
+    { id: "tree", title: "Troubleshooting decision tree", toc: "Decision tree",
+      lead: "Click through the symptoms. Each leaf names the most common causes and the next command.",
+      blocks: [{ type: "custom", html: treeHtml, init: initTree }] },
+    { id: "system", title: "Control-plane logs, metrics and traces", toc: "Control plane & traces",
+      blocks: [
+        { type: "table", head: ["Component", "Where its logs are (kubeadm)"], rows: [
+          ["kube-apiserver, scheduler, controller-manager, etcd", "Static Pods: <code>kubectl logs -n kube-system kube-apiserver-cp1</code>, or <code>crictl logs</code> when the API is down"],
+          ["kubelet, containerd", "systemd: <code>journalctl -u kubelet -u containerd --since '10 min ago'</code>"],
+          ["Audit log", "Configured with <code>--audit-policy-file</code> and <code>--audit-log-path</code>: who did what, when"]
+        ] },
+        { type: "cards", cols: 3, items: [
+          ["📈", "Component metrics", "Every component exposes Prometheus <code>/metrics</code> (apiserver request latency, etcd, scheduler queue)."],
+          ["🧵", "Traces", "kube-apiserver and kubelet export OpenTelemetry traces (stable since v1.34) to see where a slow request spends time."],
+          ["🧾", "Structured logs", "Components support <code>--logging-format=json</code> for log pipelines; contextual logging adds object references."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["📤", "Log to stdout", "Runtime files on the node, rotated by kubelet."],
+      ["🚚", "Ship logs", "No built-in storage; deleted Pods lose logs."],
+      ["⏱️", "Events expire in 1 h", "Look fast or export them."],
+      ["🔎", "describe → logs → exec", "Then the layer below: Service, DNS, node, control plane."],
+      ["⏮️", "--previous", "Logs of the crashed instance."],
+      ["🧵", "Traces & audit", "Control-plane tracing is GA (v1.34)."]
+    ],
+    cheat: `kubectl get pods -A | grep -v Running
+kubectl describe pod <p>
+kubectl logs <p> [-c c] [--previous] [-f]
+kubectl events -A --types=Warning
+kubectl debug -it <p> --image=busybox:1.36 --target=<c>
+kubectl get endpointslices -l kubernetes.io/service-name=<svc>
+journalctl -u kubelet -f`,
+    quiz: [
+      ["Container keeps restarting. First command?", ["kubectl delete pod", "kubectl logs <pod> --previous", "kubectl top", "reboot node"], 1, "See what the last instance printed."],
+      ["Pod Pending with 'Insufficient cpu'. Root cause?", ["Image missing", "Requests don't fit any node", "DNS", "RBAC"], 1, "Scheduler works on requests."],
+      ["How long are Events kept by default?", ["Forever", "1 hour", "24 hours", "Until Pod deletion"], 1, "Ship them for history."],
+      ["Endpoints empty for a Service. Why?", ["CoreDNS", "Selector mismatch or Pods not Ready", "Ingress", "PVC"], 1, "Labels and readiness drive EndpointSlices."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

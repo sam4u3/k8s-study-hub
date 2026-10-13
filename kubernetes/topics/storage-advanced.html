@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Advanced Storage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/glass.css">
+<link rel="stylesheet" href="../../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../../assets/glass.js"></script>
+<script src="../registry.js"></script>
+<script src="../../assets/topic.js"></script>
+<script>
+// Ephemeral storage budget: which writes count and when eviction hits.
+const esHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>container writable layer (logs, /tmp): <b id="e1V">300</b> Mi<input class="input" type="range" min="0" max="2000" step="50" value="300" id="e1"></label>
+    <label>emptyDir (disk): <b id="e2V">400</b> Mi<input class="input" type="range" min="0" max="2000" step="50" value="400" id="e2"></label>
+    <label>limits.ephemeral-storage: <b id="e3V">1024</b> Mi<input class="input" type="range" min="256" max="4096" step="128" value="1024" id="e3"></label>
+  </div>
+  <div style="height:22px;border-radius:8px;overflow:hidden;background:rgba(255,255,255,.06);display:flex" id="eBar"></div>
+  <div class="pipe-out" id="eOut"></div>
+</div>`;
+function initEs(el) {
+  const $ = s => el.querySelector(s);
+  const go = () => {
+    const a = +$("#e1").value, b = +$("#e2").value, l = +$("#e3").value;
+    ["e1", "e2", "e3"].forEach(i => $("#" + i + "V").textContent = $("#" + i).value);
+    const max = Math.max(l, a + b) * 1.1;
+    $("#eBar").innerHTML = `<i style="width:${a / max * 100}%;background:#5b8cff"></i><i style="width:${b / max * 100}%;background:#8b5cf6"></i><i style="width:${Math.max(0, l - a - b) / max * 100}%;background:rgba(52,211,153,.25)"></i>`;
+    const used = a + b;
+    $("#eOut").innerHTML = `used ${used} Mi of ${l} Mi limit (writable layer + logs + disk-backed emptyDir all count)<br>` +
+      (used > l ? `<span style="color:var(--red)">✗ kubelet evicts the Pod: "Pod ephemeral local storage usage exceeds the total limit of containers ${l}Mi"</span>` : `<span style="color:var(--green)">✓ within limit (${l - used} Mi free)</span>`);
+  };
+  el.querySelectorAll("input").forEach(i => i.oninput = go); go();
+}
+
+K8S_RENDER({
+  id: "storage-advanced", group: "storage", minutes: 30,
+  title: 'Advanced <span class="grad-text">storage</span>',
+  lead: "Beyond PV and PVC: volumes that combine sources, volumes that live and die with a Pod, snapshots and clones for backups and test data, online expansion, and tunable performance classes.",
+  parts: [["Projected volumes", "One mount, many sources"], ["Ephemeral volumes", "Generic, CSI, image"], ["Snapshots & clones", "Point-in-time copies"], ["Expansion & classes", "Resize, VolumeAttributesClass"], ["Local storage", "Ephemeral-storage limits"]],
+  sections: [
+    { id: "projected", title: "Projected volumes", toc: "Projected volumes",
+      lead: "Mount several sources into one directory: Secrets, ConfigMaps, Downward API fields, ServiceAccount tokens and ClusterTrustBundles (stable since v1.37).",
+      blocks: [
+        { type: "yaml", title: "projected.yaml", lines: [
+          ["volumes:", ""],
+          ["- name: app-identity", ""],
+          ["  projected:", ""],
+          ["    sources:", "All sources land in one directory."],
+          ["    - serviceAccountToken:", "<b>Bound token</b>: audience-scoped, expires, refreshed by the kubelet. This is how every Pod's default token is mounted today."],
+          ["        audience: vault", "Only valid for the audience 'vault', so leaking it can't call the Kubernetes API."],
+          ["        expirationSeconds: 3600", ""],
+          ["        path: vault-token", ""],
+          ["    - secret: {name: db-creds, items: [{key: password, path: db/password}]}", ""],
+          ["    - configMap: {name: app-config}", ""],
+          ["    - downwardAPI: {items: [{path: labels, fieldRef: {fieldPath: metadata.labels}}]}", ""],
+          ["    - clusterTrustBundle: {signerName: example.com/ca, labelSelector: {matchLabels: {env: prod}}, path: ca.pem}", "Distribute CA bundles cluster-wide without copying Secrets."]
+        ] }
+      ] },
+    { id: "ephemeral", title: "Ephemeral volumes", toc: "Ephemeral volumes",
+      blocks: [
+        { type: "table", head: ["Type", "Backed by", "Lifetime", "Use"], rows: [
+          ["<code>emptyDir</code>", "node disk or RAM", "Pod", "Scratch space, shared files between containers"],
+          ["Generic ephemeral (<code>ephemeral.volumeClaimTemplate</code>)", "Any StorageClass via a PVC created per Pod", "Pod (PVC owned by Pod)", "Big scratch disks with real storage features (snapshots, capacity tracking)"],
+          ["CSI ephemeral (<code>csi:</code> inline)", "A CSI driver that supports it", "Pod", "Secrets Store CSI driver, cert-manager csi-driver"],
+          ["Image volume (<code>image:</code>)", "An OCI image, read-only", "Pod", "Mount ML models or static data shipped as images (stable since v1.36)"]
+        ] },
+        { type: "code", title: "generic ephemeral + image volume", code: `volumes:
+- name: scratch
+  ephemeral:
+    volumeClaimTemplate:            # creates PVC <pod>-scratch, deleted with the Pod
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 50Gi
+- name: model
+  image:
+    reference: ghcr.io/example/llm-weights:v3
+    pullPolicy: IfNotPresent` }
+      ] },
+    { id: "snapshots", title: "Snapshots and clones", toc: "Snapshots & clones",
+      lead: "CSI snapshots (stable since v1.20) use three CRD-based objects installed with the external-snapshotter, mirroring StorageClass/PV/PVC.",
+      blocks: [
+        { type: "layers", items: [
+          ["VolumeSnapshotClass", "like StorageClass: driver + deletionPolicy", "#8b5cf6"],
+          ["VolumeSnapshot (namespaced)", "like PVC: 'snapshot this claim'", "#5b8cff"],
+          ["VolumeSnapshotContent (cluster)", "like PV: the real snapshot on the backend", "#34d399"]
+        ] },
+        { type: "flow", nodes: [
+          ["📸", "Snapshot", "Take a snapshot", "Create a VolumeSnapshot pointing at PVC <code>data-postgres-1</code>. The CSI driver snapshots the disk; <code>readyToUse: true</code> when done."],
+          ["🧬", "Restore", "Restore into a new PVC", "A new PVC with <code>dataSource: {kind: VolumeSnapshot, name: …}</code> is provisioned pre-filled."],
+          ["👯", "Clone", "Or clone directly", "A PVC with <code>dataSource: {kind: PersistentVolumeClaim, name: data}</code> copies an existing volume (same namespace, same StorageClass driver)."],
+          ["🧪", "Use", "Test with real data", "Spin up a staging DB from last night's snapshot in minutes."]
+        ] },
+        { type: "code", title: "snapshot + restore", code: `apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: pg-nightly
+  namespace: gamehub
+spec:
+  volumeSnapshotClassName: csi-snapclass
+  source:
+    persistentVolumeClaimName: postgres-1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pg-restore
+  namespace: gamehub
+spec:
+  storageClassName: standard
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: pg-nightly
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi` },
+        { type: "callout", kind: "warn", html: "A disk snapshot of a running database is <b>crash-consistent</b>, not application-consistent. For Postgres, prefer the operator's backup (CNPG supports volume-snapshot backups that coordinate with Postgres) or freeze writes first." }
+      ] },
+    { id: "expansion", title: "Expansion and VolumeAttributesClass", toc: "Expansion & classes",
+      blocks: [
+        { type: "steps", steps: [
+          { title: "Check the class allows it", where: "StorageClass", why: "Only classes with <code>allowVolumeExpansion: true</code> can grow. Shrinking is never supported.", code: "kubectl get sc standard -o jsonpath='{.allowVolumeExpansion}'" },
+          { title: "Edit the PVC request", where: "PVC", why: "The CSI resizer grows the backend disk, then the kubelet grows the filesystem, online for most drivers.", code: "kubectl patch pvc postgres-1 -n gamehub -p '{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"5Gi\"}}}}'\nkubectl get pvc postgres-1 -n gamehub -w\nkubectl describe pvc postgres-1 -n gamehub   # FileSystemResizeSuccessful" },
+          { title: "StatefulSets", where: "volumeClaimTemplates", why: "Changing a StatefulSet's volumeClaimTemplates isn't allowed in older versions; patch each PVC. Operators like CNPG do this for you when you change <code>storage.size</code>.", code: "for i in 1 2 3; do kubectl patch pvc postgres-$i -n gamehub -p '{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"5Gi\"}}}}'; done" },
+          { title: "Change performance live", where: "VolumeAttributesClass", why: "Stable since v1.34: switch IOPS/throughput tiers of an existing volume without recreating it (if the CSI driver supports ModifyVolume).", code: "apiVersion: storage.k8s.io/v1\nkind: VolumeAttributesClass\nmetadata:\n  name: fast\ndriverName: ebs.csi.aws.com\nparameters:\n  iops: \"8000\"\n  throughput: \"500\"\n---\n# then on the PVC:\n# spec.volumeAttributesClassName: fast" }
+        ] }
+      ] },
+    { id: "local", title: "Local ephemeral storage and limits", toc: "Local storage",
+      lead: "Container logs, writable layers and disk-backed emptyDirs all consume node disk. Without limits one noisy Pod can fill the node and trigger DiskPressure for everyone.",
+      blocks: [
+        { type: "custom", html: esHtml, init: initEs },
+        { type: "code", title: "requests & limits", code: `resources:
+  requests:
+    ephemeral-storage: "512Mi"    # scheduler reserves it
+  limits:
+    ephemeral-storage: "1Gi"      # kubelet evicts the Pod above this
+volumes:
+- name: cache
+  emptyDir:
+    sizeLimit: 500Mi              # per-volume cap` },
+        { type: "cards", cols: 3, items: [
+          ["📊", "Storage capacity tracking", "CSIStorageCapacity objects tell the scheduler how much space each topology segment has, so WaitForFirstConsumer Pods land where the disk can be created."],
+          ["🔢", "Node volume limits", "Clouds cap attached disks per VM (e.g. 25–40). The CSINode object reports it; the scheduler won't overpack."],
+          ["🩺", "Volume health", "CSI drivers can report abnormal volumes as events on PVCs and Pods (alpha feature, driver-dependent)."]
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧺", "Projected volumes", "Tokens, Secrets, ConfigMaps, Downward API in one mount."],
+      ["⏳", "Ephemeral PVCs", "Real storage with Pod lifetime; image volumes GA v1.36."],
+      ["📸", "Snapshot trio", "Class, VolumeSnapshot, Content; restore via dataSource."],
+      ["📈", "Grow, never shrink", "allowVolumeExpansion and edit the PVC."],
+      ["⚡", "VolumeAttributesClass", "Change IOPS tiers live (GA v1.34)."],
+      ["💽", "ephemeral-storage limits", "Prevent one Pod from filling node disk."]
+    ],
+    cheat: `kubectl get volumesnapshotclass,volumesnapshot,volumesnapshotcontent -A
+kubectl get pvc <p> -o jsonpath='{.status.capacity.storage}'
+kubectl patch pvc <p> -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+kubectl get volumeattributesclass
+kubectl get csistoragecapacities -A
+kubectl describe node <n> | grep -A5 'Allocated resources'`,
+    quiz: [
+      ["Which object is the namespaced 'request' for a snapshot?", ["VolumeSnapshotContent", "VolumeSnapshot", "VolumeSnapshotClass", "PersistentVolume"], 1, "Like a PVC for snapshots."],
+      ["Restore a snapshot by…", ["kubectl restore", "Creating a PVC with dataSource pointing at the VolumeSnapshot", "Editing the PV", "Deleting the PVC"], 1, "The provisioner pre-fills the new volume."],
+      ["Can you shrink a PVC from 10Gi to 5Gi?", ["Yes", "No", "Only with RWX", "Only offline"], 1, "Expansion only."],
+      ["Which writes count toward ephemeral-storage limits?", ["Only emptyDir", "Writable layer, logs and disk-backed emptyDir", "PVCs", "ConfigMaps"], 1, "All node-local disk use by the Pod."]
+    ]
+  }
+});
+</script>
+</body>
+</html>
