@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway API and TLS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Role model: who owns which Gateway API resource.
+const roleHtml = `
+<div class="sim glass">
+  <div style="display:grid;gap:10px">
+    ${[["🏗️ Infrastructure provider", "GatewayClass", "kgateway", "Which controller implements Gateways (kgateway, Envoy Gateway, Cilium, Istio, NGINX Gateway Fabric…). Cluster-scoped, installed once.", "#8b5cf6"],
+       ["🧑‍🔧 Cluster operator", "Gateway", "crash-course-gateway (ns kgateway-system)", "A concrete load balancer: listeners (ports, protocols, hostnames, TLS certs) and which namespaces may attach routes.", "#5b8cff"],
+       ["🧑‍💻 App developer", "HTTPRoute", "frontend-route (ns crash-course)", "Routing for my app: hostnames, path/header matches, filters (redirect, rewrite), weighted backends. Attaches to a Gateway via parentRefs.", "#34d399"]]
+      .map(r => `<div class="box layer-r" style="border-color:${r[4]}88;display:grid;grid-template-columns:200px 140px 1fr;gap:12px;align-items:center"><b>${r[0]}</b><span class="pill" style="color:${r[4]};border-color:${r[4]}">${r[1]}</span><span class="muted" style="font-size:13px"><code>${r[2]}</code><br>${r[3]}</span></div>`).join("")}
+  </div>
+</div>`;
+function initRole(el) {
+  if (innerWidth < 760) el.querySelectorAll(".layer-r").forEach(x => x.style.gridTemplateColumns = "1fr");
+}
+
+K8S_RENDER({
+  id: "20-gateway", group: "networking", minutes: 25, video: 20091, videoLabel: "Gateway API", repo: "manifests",
+  title: '<span class="grad-text">Gateway API</span> & TLS with cert-manager',
+  lead: "Gateway API is the successor to Ingress: role-oriented, portable and expressive. The course exposes GameHub on HTTPS with kgateway as the implementation and cert-manager issuing a Let's Encrypt certificate.",
+  parts: [["Why Gateway API", "Ingress limits"], ["Roles", "Class, Gateway, Route"], ["Install", "CRDs, kgateway, cert-manager"], ["Manifests", "Gateway, HTTPRoute, redirect"], ["Certificate flow", "ACME HTTP-01"]],
+  sections: [
+    { id: "why", title: "Why Gateway API", toc: "Why Gateway API",
+      blocks: [
+        { type: "compare", cols: [
+          { title: "Ingress", chip: "frozen API", chipClass: "amber", color: "var(--amber)", items: ["One object mixes infra and app concerns", "Only host + path HTTP routing in the spec", "Everything else via vendor annotations (not portable)", "No TCP/UDP/gRPC, no traffic splitting in the core API"] },
+          { title: "Gateway API", chip: "GA v1 since 2023", chipClass: "green", color: "var(--green)", items: ["Separate resources per role", "Header/query matches, redirects, rewrites, mirroring, weights", "HTTPRoute, GRPCRoute (GA); TLS/TCP/UDP routes", "Cross-namespace attachment with explicit permission"] }
+        ] }
+      ] },
+    { id: "roles", title: "Three resources, three roles", toc: "Roles",
+      blocks: [
+        { type: "custom", html: roleHtml, init: initRole },
+        { type: "pipeline", intro: "A request for https://k8s2025.kubesimplify.com/ through the course setup.",
+          stages: [["Client", "DNS → LB IP"], ["LoadBalancer Svc", "kgateway proxy"], ["Gateway listener", "https:443, TLS terminate"], ["HTTPRoute", "host + PathPrefix /"], ["Service frontend", "crash-course:80"], ["Pod", "nginx + React"]],
+          scenarios: [
+            { label: "https://…/", notes: ["", "Envoy-based kgateway proxy", "cert from Secret course-kubesimplify-com-tls", "frontend-route matches", "", ""], out: '<span style="color:var(--green)">✓ 200 OK over TLS</span>' },
+            { label: "http://…/", path: [0, 1, 2, 3], notes: ["", "", "http:80 listener", "frontend-redirect: RequestRedirect"], out: '<span style="color:var(--amber)">↪ 301 Moved Permanently → https://k8s2025.kubesimplify.com/</span>' },
+            { label: "Unknown host", path: [0, 1, 2, 3], fail: 3, out: '<span style="color:var(--red)">✗ 404: no HTTPRoute attached for this hostname</span>' }
+          ] }
+      ] },
+    { id: "install", title: "Install the building blocks", toc: "Install",
+      lead: "Gateway API CRDs are not built into Kubernetes; you install them, plus an implementation and cert-manager. Versions below are the course's; check for current releases.",
+      blocks: [
+        { type: "steps", steps: [
+          { title: "cert-manager", where: "kubectl", why: "Issues and renews certificates as Kubernetes Secrets from ACME (Let's Encrypt), Vault, self-signed CAs…", code: "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.0/cert-manager.yaml\nkubectl get pods -n cert-manager" },
+          { title: "Enable Gateway API in cert-manager", where: "kubectl", why: "cert-manager must be told to watch Gateways (for the annotation shim) and to create HTTPRoutes for HTTP-01 challenges.", code: "kubectl edit deploy cert-manager -n cert-manager\n#   args:\n#   - --enable-gateway-api\nkubectl rollout restart deployment cert-manager -n cert-manager" },
+          { title: "Gateway API CRDs", where: "kubectl", why: "Standard channel = GA resources (GatewayClass, Gateway, HTTPRoute, GRPCRoute, ReferenceGrant).", code: "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml\nkubectl api-resources --api-group=gateway.networking.k8s.io" },
+          { title: "kgateway", where: "helm", why: "Envoy-based Gateway API implementation (CNCF project, formerly Gloo). Its chart creates GatewayClass <code>kgateway</code>.", code: "helm upgrade -i --create-namespace --namespace kgateway-system --version v2.0.1 \\\n  kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds\nhelm upgrade -i --namespace kgateway-system --version v2.0.1 \\\n  kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway\nkubectl get gatewayclass" }
+        ] }
+      ] },
+    { id: "manifests", title: "The manifests", toc: "Manifests",
+      blocks: [
+        { type: "yaml", title: "manifests/gateway.yaml", lines: [
+          ["apiVersion: gateway.networking.k8s.io/v1", ""],
+          ["kind: Gateway", ""],
+          ["metadata:", ""],
+          ["  name: crash-course-gateway", ""],
+          ["  namespace: kgateway-system", "Lives with the infra team; routes come from app namespaces."],
+          ["  annotations:", ""],
+          ["    cert-manager.io/cluster-issuer: letsencrypt-prod", "<b>gateway-shim</b>: cert-manager sees this and creates a Certificate for each HTTPS listener's hostname, stored in the referenced Secret."],
+          ["spec:", ""],
+          ["  gatewayClassName: kgateway", "Which implementation programs this Gateway."],
+          ["  listeners:", ""],
+          ["  - name: http", "Plain HTTP on 80: needed for ACME HTTP-01 and for the redirect."],
+          ["    protocol: HTTP", ""],
+          ["    port: 80", ""],
+          ["    allowedRoutes: {namespaces: {from: All}}", "Routes from any namespace may attach. Use <code>Selector</code> to restrict in shared clusters."],
+          ["  - name: https", ""],
+          ["    protocol: HTTPS", ""],
+          ["    port: 443", ""],
+          ["    hostname: \"k8s2025.kubesimplify.com\"", "Only this host on 443. Must have DNS pointing at the Gateway's address."],
+          ["    tls:", ""],
+          ["      mode: Terminate", "TLS ends at the Gateway; traffic to Pods is plain HTTP inside the cluster."],
+          ["      certificateRefs:", ""],
+          ["      - {kind: Secret, name: course-kubesimplify-com-tls}", "Secret that cert-manager fills with tls.crt / tls.key."],
+          ["    allowedRoutes: {namespaces: {from: All}}", ""]
+        ] },
+        { type: "tabs", tabs: [
+          { label: "HTTPRoute", blocks: [{ type: "code", title: "manifests/httproute.yaml", code: `apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend-route
+  namespace: crash-course
+spec:
+  parentRefs:
+  - name: crash-course-gateway
+    namespace: kgateway-system        # cross-namespace attach (allowed by listener)
+  hostnames:
+  - "k8s2025.kubesimplify.com"
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: frontend
+      port: 80
+      kind: Service` }] },
+          { label: "HTTP → HTTPS redirect", blocks: [{ type: "code", title: "manifests/httpredirect.yaml", code: `apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend-redirect
+  namespace: crash-course
+spec:
+  parentRefs:
+  - name: crash-course-gateway
+    namespace: kgateway-system
+    sectionName: http                 # attach only to the port-80 listener
+  hostnames:
+  - k8s2025.kubesimplify.com
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301` }] },
+          { label: "ClusterIssuer", blocks: [{ type: "code", title: "manifests/cluster-issuer.yaml", code: `apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com              # expiry notices
+    privateKeySecretRef:
+      name: letsencrypt-prod            # ACME account key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - name: crash-course-gateway
+            namespace: kgateway-system
+            kind: Gateway` }] },
+          { label: "Canary weights", blocks: [{ type: "code", title: "bonus: weighted backends", code: `rules:
+- backendRefs:
+  - name: frontend
+    port: 80
+    weight: 90
+  - name: frontend-v2
+    port: 80
+    weight: 10      # exact 10% split, independent of Pod counts` }] }
+        ] },
+        { type: "callout", kind: "info", html: "The course's httproute.yaml uses <code>gateway.networking.k8s.io/v1beta1</code>; HTTPRoute is GA, so use <code>v1</code> in new manifests." }
+      ] },
+    { id: "certs", title: "How the certificate gets issued", toc: "Certificate flow",
+      blocks: [
+        { type: "flow", interval: 3400, nodes: [
+          ["🏷️", "Annotation", "gateway-shim sees the Gateway", "cert-manager reads <code>cert-manager.io/cluster-issuer</code> and creates a <code>Certificate</code> for k8s2025.kubesimplify.com → Secret course-kubesimplify-com-tls."],
+          ["📨", "Order", "ACME order", "cert-manager registers with Let's Encrypt and asks for a cert. LE replies: prove you control the domain via HTTP-01."],
+          ["🧩", "Challenge", "Temporary solver route", "cert-manager starts a solver Pod and an HTTPRoute on the Gateway for <code>/.well-known/acme-challenge/&lt;token&gt;</code>."],
+          ["🌍", "Validate", "Let's Encrypt fetches the token", "LE requests http://k8s2025.kubesimplify.com/.well-known/… from the internet. DNS must already point at the Gateway and port 80 must be open."],
+          ["📜", "Issue", "Certificate issued", "cert-manager stores tls.crt and tls.key in the Secret; the Gateway listener picks it up. Solver resources are deleted."],
+          ["🔁", "Renew", "Auto-renew", "About 30 days before expiry (LE certs last 90 days) the whole flow repeats automatically."]
+        ] },
+        { type: "term", title: "verify and debug", lines: [
+          "$ kubectl apply -f manifests/cluster-issuer.yaml -f manifests/gateway.yaml -f manifests/httproute.yaml -f manifests/httpredirect.yaml",
+          "$ kubectl get gateway -n kgateway-system",
+          "NAME                   CLASS      ADDRESS         PROGRAMMED",
+          "crash-course-gateway   kgateway   194.182.x.x     True",
+          "$ kubectl get httproute -n crash-course",
+          "$ kubectl get certificate,certificaterequest,order,challenge -A",
+          "$ kubectl describe challenge -A          # pending? check DNS and port 80",
+          "$ curl -I http://k8s2025.kubesimplify.com    # 301",
+          "$ curl -I https://k8s2025.kubesimplify.com   # 200",
+          "✓ use the letsencrypt-staging server while testing to avoid rate limits"
+        ] }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["🧩", "3 roles, 3 kinds", "GatewayClass (infra), Gateway (ops), HTTPRoute (dev)."],
+      ["🔗", "parentRefs attach", "Routes attach to Gateways; listeners decide which namespaces may."],
+      ["🔐", "TLS terminate at Gateway", "certificateRefs → Secret managed by cert-manager."],
+      ["🤖", "cert-manager automates ACME", "HTTP-01 via a temporary HTTPRoute; auto-renew."],
+      ["↪️", "Redirect with a filter", "RequestRedirect on the http listener (sectionName)."],
+      ["⚖️", "Weighted backends", "Exact canary percentages in the core API."]
+    ],
+    cheat: `kubectl get gatewayclass,gateway -A
+kubectl get httproute -A
+kubectl describe gateway <gw> -n <ns>     # listener + attached route status
+kubectl get certificate -A; kubectl describe certificate <c> -n <ns>
+kubectl get challenge -A
+curl -vI https://<host>`,
+    quiz: [
+      ["Which resource does an app developer usually own?", ["GatewayClass", "Gateway", "HTTPRoute", "ClusterIssuer"], 2, "Routes are app-level; Gateways are shared infrastructure."],
+      ["How does an HTTPRoute attach to a Gateway?", ["Labels", "spec.parentRefs", "Annotation", "Same name"], 1, "parentRefs (optionally sectionName for one listener)."],
+      ["Why must port 80 stay open with HTTP-01?", ["For redirects only", "Let's Encrypt validates the challenge over HTTP", "Envoy needs it", "Gateway API requires it"], 1, "The CA fetches the token from http://<host>/.well-known/acme-challenge/."],
+      ["Where does the issued certificate live?", ["In the Gateway spec", "In a Kubernetes Secret referenced by certificateRefs", "In etcd under /certs", "In the HTTPRoute"], 1, "cert-manager writes tls.crt/tls.key into the Secret."],
+      ["Gateway API advantage over Ingress for canaries?", ["Faster", "Weighted backendRefs in the standard spec", "No controller needed", "Works without Services"], 1, "No vendor annotations required."]
+    ]
+  }
+});
+</script>
+</body>
+</html>

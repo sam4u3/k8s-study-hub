@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Volumes and CloudNativePG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/glass.css">
+<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="../assets/glass.js"></script>
+<script src="../assets/topics.js"></script>
+<script src="../assets/topic.js"></script>
+<script>
+// Volume survival matrix: what happens to data on each event.
+const SURV = {
+  emptyDir: { c: "✅", p: "❌", n: "❌", note: "Lives as long as the Pod. Shared between containers. <code>medium: Memory</code> = tmpfs counted against memory limits." },
+  hostPath: { c: "✅", p: "⚠️ same node only", n: "❌", note: "A directory on the node. Pod rescheduled elsewhere sees different data. Security risk; avoid outside node agents." },
+  "PVC (block, RWO)": { c: "✅", p: "✅", n: "✅ (re-attached)", note: "Independent lifecycle. Detached from the old node and attached to the new one (same zone)." },
+  "PVC (NFS, RWX)": { c: "✅", p: "✅", n: "✅", note: "Network filesystem mounted by many Pods on many nodes at once." }
+};
+const survHtml = `
+<div class="sim glass">
+  <div class="ctrl" style="margin:0 0 12px">${Object.keys(SURV).map((k, i) => `<button class="btn small ${i ? "" : "primary"}" data-v="${k}">${k}</button>`).join("")}</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px" id="sv3">
+    <div class="stage"><b>Container restarts</b><small id="s1"></small></div>
+    <div class="stage"><b>Pod deleted / recreated</b><small id="s2"></small></div>
+    <div class="stage"><b>Pod moves to another node</b><small id="s3"></small></div>
+  </div>
+  <div class="flow-caption" id="sNote" style="margin-top:12px"></div>
+</div>`;
+function initSurv(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#sv3").style.gridTemplateColumns = "1fr";
+  const show = k => {
+    el.querySelectorAll("[data-v]").forEach(b => b.classList.toggle("primary", b.dataset.v === k));
+    const d = SURV[k];
+    [["s1", d.c], ["s2", d.p], ["s3", d.n]].forEach(([id, v], i) => {
+      const s = $("#" + id); s.parentElement.className = "stage"; s.textContent = "…";
+      setTimeout(() => { s.textContent = v; s.parentElement.classList.add(v.startsWith("✅") ? "pass" : v.startsWith("❌") ? "deny" : "hit"); }, 250 + i * 350);
+    });
+    $("#sNote").innerHTML = `<h4>${k}</h4><p>${d.note}</p>`;
+  };
+  el.querySelectorAll("[data-v]").forEach(b => b.onclick = () => show(b.dataset.v));
+  show("emptyDir");
+}
+
+// PV/PVC binding matcher
+const bindHtml = `
+<div class="sim glass">
+  <div class="sim-row">
+    <label>PVC storageClassName<select class="input" id="bSc"><option>local-storage</option><option>exoscale-sbs</option><option value="">"" (none)</option></select></label>
+    <label>PVC request: <b id="bRqV">3</b>Gi<input class="input" type="range" min="1" max="8" value="3" id="bRq"></label>
+    <label>PVC accessMode<select class="input" id="bAm"><option>ReadWriteOnce</option><option>ReadWriteMany</option></select></label>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px" id="bPvs"></div>
+  <div class="pipe-out" id="bOut"></div>
+</div>`;
+const PVS = [{ name: "demo-pv", sc: "local-storage", cap: 5, am: ["ReadWriteOnce"] }, { name: "nfs-pv", sc: "", cap: 1, am: ["ReadWriteMany"] }, { name: "small-pv", sc: "local-storage", cap: 2, am: ["ReadWriteOnce"] }];
+function initBind(el) {
+  const $ = s => el.querySelector(s);
+  if (innerWidth < 760) $("#bPvs").style.gridTemplateColumns = "1fr";
+  const go = () => {
+    const sc = $("#bSc").value, rq = +$("#bRq").value, am = $("#bAm").value;
+    $("#bRqV").textContent = rq;
+    const r = PVS.map(p => { const why = []; if (p.sc !== sc) why.push(`class "${p.sc}" ≠ "${sc}"`); if (p.cap < rq) why.push(`${p.cap}Gi < ${rq}Gi`); if (!p.am.includes(am)) why.push(`no ${am}`); return { p, why }; });
+    const ok = r.filter(x => !x.why.length).sort((a, b) => a.p.cap - b.p.cap)[0];
+    $("#bPvs").innerHTML = r.map(x => `<div class="box" style="border-color:${x === ok ? "var(--green)" : x.why.length ? "rgba(248,113,113,.45)" : "var(--border)"}"><b style="font:600 13px var(--mono)">${x === ok ? "🔗 " : ""}${x.p.name}</b><div class="faint" style="font:11.5px/1.6 var(--mono)">class: ${x.p.sc || '""'}<br>${x.p.cap}Gi · ${x.p.am.join(",")}</div><div style="font-size:12px;color:${x.why.length ? "#fca5a5" : "#86efac"}">${x.why.join("<br>") || "compatible"}</div></div>`).join("");
+    $("#bOut").innerHTML = ok ? `<span style="color:var(--green)">✓ PVC demo-pvclaim Bound to ${ok.p.name} (smallest PV that satisfies the claim; you get all ${ok.p.cap}Gi)</span>`
+      : sc === "exoscale-sbs" ? `<span style="color:var(--green)">✓ no static PV matches, but class exoscale-sbs has a provisioner → CSI creates a new ${rq}Gi volume (dynamic provisioning)</span>`
+      : `<span style="color:var(--amber)">⏳ PVC stays Pending: no matching PV and no provisioner for this class</span>`;
+  };
+  el.querySelectorAll("input,select").forEach(i => i.oninput = go); go();
+}
+
+K8S_RENDER({
+  id: "19-volumes", group: "storage", minutes: 30, video: 18931, videoLabel: "CloudNativePG & Volumes", repo: "volumes",
+  title: 'Volumes, PV/PVC & <span class="grad-text">CloudNativePG</span>',
+  lead: "Containers have throwaway filesystems. Volumes decide where data lives and how long it survives. Then the course puts GameHub's database on Kubernetes the right way: with an operator.",
+  parts: [["Ephemeral volumes", "emptyDir, hostPath"], ["PV & PVC", "Static binding"], ["StorageClass", "Dynamic provisioning"], ["NFS", "ReadWriteMany"], ["CloudNativePG", "Postgres operator"]],
+  sections: [
+    { id: "ephemeral", title: "Ephemeral volumes", toc: "Ephemeral volumes",
+      blocks: [
+        { type: "custom", html: survHtml, init: initSurv },
+        { type: "tabs", tabs: [
+          { label: "emptyDir", blocks: [{ type: "code", title: "volumes/emptyDir.yaml", code: `spec:
+  containers:
+  - name: busybox
+    image: busybox
+    command: ['sh', '-c', 'echo "Hello from Kubesimplify" > /data/emptydir-volume/hello.txt; sleep 3600']
+    volumeMounts:
+    - name: temp-storage
+      mountPath: /data/emptydir-volume
+  volumes:
+  - name: temp-storage
+    emptyDir: {}
+#   emptyDir:            # emptyDIR2: RAM-backed
+#     medium: Memory
+#     sizeLimit: 512Mi` }] },
+          { label: "hostPath", blocks: [{ type: "code", title: "volumes/hostpath.yaml", code: `spec:
+  containers:
+  - name: busybox
+    image: busybox
+    command: ['sh', '-c', 'echo "Hello" > /data/hostpath-volume/hello.txt; sleep 3600']
+    volumeMounts:
+    - name: host-storage
+      mountPath: /data/hostpath-volume
+  volumes:
+  - name: host-storage
+    hostPath:
+      path: /tmp/hostpath
+      type: DirectoryOrCreate
+# on the node: cat /tmp/hostpath/hello.txt` }] }
+        ] },
+        { type: "callout", kind: "warn", html: "hostPath gives a Pod access to the node's filesystem. Mounting <code>/</code> or <code>/var/run</code> is effectively root on the node. Pod Security 'baseline' and 'restricted' forbid it." }
+      ] },
+    { id: "pvpvc", title: "PersistentVolumes and claims", toc: "PV & PVC",
+      lead: "Split of concerns: admins (or provisioners) create <b>PersistentVolumes</b> = actual storage. Developers create <b>PersistentVolumeClaims</b> = requests for storage. Kubernetes binds a claim to a matching volume.",
+      blocks: [
+        { type: "custom", html: bindHtml, init: initBind },
+        { type: "code", title: "volumes/local volume: sc + pv + pvc + pod", code: `apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner   # static only
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: demo-pv
+spec:
+  storageClassName: local-storage
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  hostPath:
+    path: "/opt/data"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-pvclaim
+spec:
+  storageClassName: local-storage
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 3Gi
+---
+# Pod: volumes: [{name: pv-vol, persistentVolumeClaim: {claimName: demo-pvclaim}}]` },
+        { type: "table", head: ["Access mode", "Meaning", "Typical backend"], rows: [
+          ["<code>ReadWriteOnce</code> (RWO)", "Read-write by Pods on <b>one node</b>", "Block disks: EBS, Exoscale SBS, Ceph RBD"],
+          ["<code>ReadWriteOncePod</code>", "Read-write by <b>one Pod</b> only", "CSI block drivers"],
+          ["<code>ReadOnlyMany</code> (ROX)", "Read-only by many nodes", "NFS, object gateways"],
+          ["<code>ReadWriteMany</code> (RWX)", "Read-write by many nodes", "NFS, CephFS, EFS, Azure Files"]
+        ] },
+        { type: "callout", kind: "info", html: "<b>reclaimPolicy</b>: <code>Delete</code> (default for dynamic) removes the disk when the PVC is deleted. <code>Retain</code> keeps the PV in <code>Released</code> state for manual recovery: use it for anything you can't recreate." }
+      ] },
+    { id: "dynamic", title: "StorageClass and dynamic provisioning", toc: "StorageClass",
+      lead: "No admin pre-creating PVs: the PVC names a StorageClass whose CSI provisioner creates a volume on demand. The course's MySQL StatefulSet requests 10Gi from Exoscale block storage.",
+      blocks: [
+        { type: "code", title: "volumes/dynamic-provisioning.yaml (excerpt)", code: `kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  serviceName: mysql
+  replicas: 3
+  # template: mysql:8.0 mounting /var/lib/mysql …
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-persistent-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: exoscale-sbs       # CSI-backed class on SKS
+      resources:
+        requests:
+          storage: 10Gi
+# kubectl get pvc → 3 PVCs, kubectl get pv → 3 dynamically created PVs` },
+        { type: "callout", kind: "tip", html: "A class annotated <code>storageclass.kubernetes.io/is-default-class: \"true\"</code> is used when a PVC omits <code>storageClassName</code>. Set it to <code>\"\"</code> explicitly to bind only to static PVs without a class." }
+      ] },
+    { id: "nfs", title: "NFS for ReadWriteMany", toc: "NFS",
+      blocks: [
+        { type: "code", title: "volumes/nfs", code: `# on an NFS server: export /srv/nfs/kubedata; on every node: apt install nfs-common
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteMany]
+  nfs:
+    path: /srv/nfs/kubedata
+    server: <NFS_SERVER_IP>
+  persistentVolumeReclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-pvc
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+# Pod writes /mnt/data/hello.txt → visible on the NFS server and to every Pod using nfs-pvc` }
+      ] },
+    { id: "cnpg", title: "CloudNativePG: Postgres the Kubernetes way", toc: "CloudNativePG",
+      lead: "A StatefulSet gives identity and disks, not replication or failover. An <b>operator</b> encodes a DBA's knowledge as a controller: it watches a custom resource (<code>Cluster</code>) and runs primary election, streaming replication, failover, backups and upgrades.",
+      blocks: [
+        { type: "flow", interval: 3400, nodes: [
+          ["📦", "Install", "Install the operator", "Applies CRDs (Cluster, Backup, Pooler…) and the operator Deployment in <code>cnpg-system</code>."],
+          ["📄", "Cluster CR", "Apply a Cluster", "You declare: 3 instances, 1Gi storage, database <code>dbname</code> owned by <code>user</code>, run init.sql after creation."],
+          ["🥇", "Primary", "Bootstrap the primary", "Operator creates PVC + Pod <code>postgres-1</code>, runs initdb, creates the app DB and Secret <code>postgres-app</code> (username/password/uri)."],
+          ["📜", "init.sql", "Run post-init SQL", "<code>postInitApplicationSQLRefs</code> executes init.sql from the ConfigMap: GameHub tables and grants."],
+          ["🥈", "Replicas", "Clone replicas", "<code>postgres-2</code> and <code>postgres-3</code> are cloned with pg_basebackup and stream WAL from the primary."],
+          ["🔀", "Services", "Create Services", "<code>postgres-rw</code> → primary only, <code>postgres-ro</code> → replicas, <code>postgres-r</code> → any. GameHub uses postgres-rw."],
+          ["🚑", "Failover", "Primary dies", "Operator promotes the most advanced replica and repoints <code>postgres-rw</code>. Apps reconnect to the same DNS name."]
+        ] },
+        { type: "yaml", title: "manifests/pgcluster.yaml", lines: [
+          ["apiVersion: postgresql.cnpg.io/v1", "<b>Custom resource</b> from the CNPG CRD. Kubernetes didn't know this kind until the operator installed it."],
+          ["kind: Cluster", ""],
+          ["metadata:", ""],
+          ["  name: postgres", "Prefix for Pods (postgres-1..3), Services (postgres-rw/ro/r) and Secrets (postgres-app, postgres-superuser)."],
+          ["  namespace: crash-course", ""],
+          ["spec:", ""],
+          ["  instances: 3", "1 primary + 2 streaming replicas, spread across nodes."],
+          ["  storage:", ""],
+          ["    size: 1Gi", "PVC per instance from the default StorageClass. CNPG manages PVCs directly (no StatefulSet)."],
+          ["  bootstrap:", ""],
+          ["    initdb:", "Create a fresh cluster (other options: recovery from backup, pg_basebackup from external)."],
+          ["      database: dbname", "Matches POSTGRES_DB in the GameHub Deployments."],
+          ["      owner: user", "App role; its password lands in Secret postgres-app."],
+          ["      postInitApplicationSQLRefs:", "SQL run in the app DB right after creation."],
+          ["        configMapRefs:", ""],
+          ["        - name: init-sql", "ConfigMap created from init.sql."],
+          ["          key: init.sql", ""]
+        ] },
+        { type: "steps", steps: [
+          { title: "Install operator", where: "kubectl", why: "Server-side apply handles the large CRDs. Use the release that matches the course or the current one.", code: "kubectl apply --server-side -f \\\n  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.2.yaml\nkubectl get pods -n cnpg-system" },
+          { title: "Init SQL ConfigMap", where: "kubectl", why: "Holds the schema for users, snake_high_scores and games_stats.", code: "kubectl create ns crash-course\nkubectl create configmap init-sql --from-file=init.sql=./init.sql -n crash-course" },
+          { title: "Create the Cluster", where: "kubectl", why: "Watch the operator bring up primary then replicas.", code: "kubectl apply -f manifests/pgcluster.yaml\nkubectl get cluster -n crash-course -w\nkubectl get pods,svc,pvc,secret -n crash-course" },
+          { title: "Connect and verify", where: "kubectl", why: "The app Secret has the credentials GameHub reads with secretKeyRef.", code: "kubectl get secret postgres-app -n crash-course -o jsonpath='{.data.username}' | base64 -d\nkubectl exec -it postgres-1 -n crash-course -- psql -U postgres -d dbname -c '\\dt'\n# kubectl cnpg status postgres -n crash-course   (cnpg kubectl plugin)" }
+        ] },
+        { type: "callout", kind: "warn", html: "Replication is not backup. A <code>DROP TABLE</code> replicates instantly. Configure CNPG <code>backup</code> to object storage (barman-cloud / plugin) and test restores." }
+      ] }
+  ],
+  summary: {
+    takeaways: [
+      ["⏳", "emptyDir = Pod lifetime", "Survives container restarts, not Pod deletion."],
+      ["🖥️", "hostPath = node-bound", "Risky; for node agents only."],
+      ["🤝", "PVC claims, PV provides", "Bound by class, size and access mode."],
+      ["⚡", "StorageClass provisions", "CSI creates volumes on demand."],
+      ["♻️", "Retain for precious data", "Delete is the dynamic default."],
+      ["🐘", "Operators run databases", "CNPG: failover, replicas, -rw/-ro Services, Secrets."]
+    ],
+    cheat: `kubectl get sc,pv,pvc
+kubectl describe pvc <name>             # Pending? read Events
+kubectl patch pv <pv> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+kubectl get cluster -n crash-course     # CNPG
+kubectl get svc -n crash-course | grep postgres
+kubectl get secret postgres-app -n crash-course -o jsonpath='{.data.uri}' | base64 -d`,
+    quiz: [
+      ["Which volume survives container restart but not Pod deletion?", ["PVC", "emptyDir", "NFS", "hostPath"], 1, "emptyDir is tied to the Pod."],
+      ["PVC requests 3Gi; only a 5Gi matching PV exists. Result?", ["Pending", "Bound, and gets the whole 5Gi", "PV shrinks to 3Gi", "Error"], 1, "Binding picks a PV at least as large; capacity isn't split."],
+      ["Which access mode allows writes from Pods on many nodes?", ["RWO", "ROX", "RWX", "RWOP"], 2, "ReadWriteMany: NFS, CephFS, EFS…"],
+      ["Which CNPG Service should an app use for writes?", ["postgres-ro", "postgres-r", "postgres-rw", "postgres-headless"], 2, "-rw always points at the current primary."],
+      ["Why use an operator instead of a plain StatefulSet for Postgres?", ["Faster disks", "It automates replication, failover, backups and upgrades", "StatefulSets can't use PVCs", "Required by Kubernetes"], 1, "Operators encode operational knowledge in a controller."]
+    ]
+  }
+});
+</script>
+</body>
+</html>
